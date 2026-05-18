@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import {
@@ -103,6 +103,7 @@ import {
 } from "@/lib/createDatabaseSql";
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/objectRenameSql";
 import { hexToRgba } from "@/lib/color";
+import { focusSidebarRenameInput, shouldPreventRenameCloseAutoFocus } from "@/lib/sidebarRenameFocus";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -1455,11 +1456,23 @@ function openVisibleDatabasesDialog() {
 // --- Connection Group Management ---
 const isRenamingGroup = ref(false);
 const renameInput = ref("");
+const renameInputRef = ref<HTMLInputElement>();
+const preventRenameCloseAutoFocus = ref(false);
 
 function startRenameGroup() {
   renameInput.value = props.node.label;
   isRenamingGroup.value = true;
+  preventRenameCloseAutoFocus.value = true;
   emit("rename-started");
+  nextTick(() => {
+    focusSidebarRenameInput(() => (isRenamingGroup.value ? renameInputRef.value : undefined));
+  });
+}
+
+function onContextMenuCloseAutoFocus(event: Event) {
+  if (shouldPreventRenameCloseAutoFocus(preventRenameCloseAutoFocus)) {
+    event.preventDefault();
+  }
 }
 
 watch(
@@ -1687,13 +1700,13 @@ const isDragging = computed(() => dragState.active && dragState.draggedId === pr
           />
           <input
             v-if="isRenamingGroup"
+            ref="renameInputRef"
             v-model="renameInput"
-            class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 text-xs outline-none"
+            class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"
             @blur="finishRenameGroup"
             @keydown.enter.prevent="finishRenameGroup"
             @keydown.escape.prevent="isRenamingGroup = false"
             @click.stop
-            @vue:mounted="($event: any) => $event.el.focus()"
           />
           <Tooltip v-else :disabled="!isTruncated">
             <TooltipTrigger as-child>
@@ -1742,7 +1755,7 @@ const isDragging = computed(() => dragState.active && dragState.draggedId === pr
       </div>
     </ContextMenuTrigger>
 
-    <ContextMenuContent class="w-auto min-w-36">
+    <ContextMenuContent class="w-auto min-w-36" @close-auto-focus="onContextMenuCloseAutoFocus">
       <ContextMenuItem v-if="canPin" @click="togglePin">
         <Pin class="w-4 h-4" :class="{ 'fill-current': isPinned }" />
         {{ isPinned ? t("contextMenu.unpin") : t("contextMenu.pin") }}
@@ -1816,7 +1829,7 @@ const isDragging = computed(() => dragState.active && dragState.draggedId === pr
           <Plus class="w-4 h-4" /> {{ t("toolbar.newConnection") }}
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem @click="startRenameGroup">
+        <ContextMenuItem @select="startRenameGroup">
           <Pencil class="w-4 h-4" /> {{ t("connectionGroup.renameGroup") }}
         </ContextMenuItem>
         <ContextMenuSeparator />
