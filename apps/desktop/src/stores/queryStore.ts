@@ -107,8 +107,21 @@ export const useQueryStore = defineStore("query", () => {
     { flush: "post" },
   );
 
-  function findTabByTitle(connectionId: string, database: string, title: string) {
-    return tabs.value.find((t) => t.connectionId === connectionId && t.database === database && t.title === title);
+  function findTabByIdentity(
+    connectionId: string,
+    database: string,
+    title: string,
+    mode: QueryTab["mode"],
+    schema?: string,
+  ) {
+    return tabs.value.find(
+      (tab) =>
+        tab.connectionId === connectionId &&
+        tab.database === database &&
+        tab.title === title &&
+        tab.mode === mode &&
+        (tab.schema || "") === (schema || ""),
+    );
   }
 
   function createTab(
@@ -119,7 +132,7 @@ export const useQueryStore = defineStore("query", () => {
     schema?: string,
   ) {
     if (title) {
-      const existing = findTabByTitle(connectionId, database, title);
+      const existing = findTabByIdentity(connectionId, database, title, mode, schema);
       if (existing) {
         activeTabId.value = existing.id;
         return existing.id;

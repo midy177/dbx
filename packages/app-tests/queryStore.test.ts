@@ -118,3 +118,23 @@ test("evicting cached tab results releases multi-result payloads and sessions", 
     restoreStorage();
   }
 });
+
+test("tab reuse is scoped by mode and schema instead of title alone", () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useQueryStore();
+
+    const dataTabId = store.createTab("conn-1", "db", "users", "data", "public");
+    const sourceTabId = store.createTab("conn-1", "db", "users", "query", "public");
+    const otherSchemaTabId = store.createTab("conn-1", "db", "users", "data", "audit");
+    const reusedDataTabId = store.createTab("conn-1", "db", "users", "data", "public");
+
+    assert.notEqual(sourceTabId, dataTabId);
+    assert.notEqual(otherSchemaTabId, dataTabId);
+    assert.equal(reusedDataTabId, dataTabId);
+    assert.equal(store.tabs.length, 3);
+  } finally {
+    restoreStorage();
+  }
+});

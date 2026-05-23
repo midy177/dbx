@@ -711,7 +711,7 @@ function viewObjectSource() {
       return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, objectType as any);
     })
     .then(async (result) => {
-      const tabId = queryStore.createTab(node.connectionId!, node.database!, node.label);
+      const tabId = queryStore.createTab(node.connectionId!, node.database!, `Source - ${node.label}`);
       queryStore.updateSql(tabId, result.source);
       queryStore.setObjectSource(tabId, {
         schema,

@@ -183,6 +183,13 @@ test("table expander loads groups by the actual tree node id", () => {
   );
 });
 
+test("view metadata groups only expose columns", () => {
+  assert.match(
+    connectionStoreSource,
+    /if \(node\.type === "table"\) \{[\s\S]*type: "group-indexes"[\s\S]*type: "group-fkeys"[\s\S]*type: "group-triggers"/,
+  );
+});
+
 test("table metadata group expanders load by their actual tree node ids", () => {
   for (const [type, loader] of [
     ["group-columns", "loadColumns"],

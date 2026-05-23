@@ -979,7 +979,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
 
-    setChildren(node, [
+    const children: TreeNode[] = [
       {
         id: `${parentId}:__columns`,
         label: "tree.columns",
@@ -991,40 +991,47 @@ export const useConnectionStore = defineStore("connection", () => {
         isExpanded: false,
         children: [],
       },
-      {
-        id: `${parentId}:__indexes`,
-        label: "tree.indexes",
-        type: "group-indexes",
-        connectionId,
-        database,
-        schema,
-        tableName: table,
-        isExpanded: false,
-        children: [],
-      },
-      {
-        id: `${parentId}:__fkeys`,
-        label: "tree.foreignKeys",
-        type: "group-fkeys",
-        connectionId,
-        database,
-        schema,
-        tableName: table,
-        isExpanded: false,
-        children: [],
-      },
-      {
-        id: `${parentId}:__triggers`,
-        label: "tree.triggers",
-        type: "group-triggers",
-        connectionId,
-        database,
-        schema,
-        tableName: table,
-        isExpanded: false,
-        children: [],
-      },
-    ]);
+    ];
+
+    if (node.type === "table") {
+      children.push(
+        {
+          id: `${parentId}:__indexes`,
+          label: "tree.indexes",
+          type: "group-indexes",
+          connectionId,
+          database,
+          schema,
+          tableName: table,
+          isExpanded: false,
+          children: [],
+        },
+        {
+          id: `${parentId}:__fkeys`,
+          label: "tree.foreignKeys",
+          type: "group-fkeys",
+          connectionId,
+          database,
+          schema,
+          tableName: table,
+          isExpanded: false,
+          children: [],
+        },
+        {
+          id: `${parentId}:__triggers`,
+          label: "tree.triggers",
+          type: "group-triggers",
+          connectionId,
+          database,
+          schema,
+          tableName: table,
+          isExpanded: false,
+          children: [],
+        },
+      );
+    }
+
+    setChildren(node, children);
     node.isExpanded = true;
   }
 
