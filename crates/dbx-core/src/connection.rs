@@ -549,32 +549,26 @@ impl AppState {
             let conns = self.connections.read().await;
             for (key, pool) in conns.iter() {
                 let healthy = match pool {
-                    PoolKind::Mysql(p, _) => {
-                        match db::mysql::get_conn_with_health_check(p).await {
-                            Ok(_) => true,
-                            Err(e) => {
-                                log::warn!("MySQL connection pool '{key}' is unhealthy: {e}");
-                                false
-                            }
+                    PoolKind::Mysql(p, _) => match db::mysql::get_conn_with_health_check(p).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            log::warn!("MySQL connection pool '{key}' is unhealthy: {e}");
+                            false
                         }
-                    }
-                    PoolKind::Postgres(p) => {
-                        match p.get().await {
-                            Ok(client) => {
-                                match client.simple_query("SELECT 1").await {
-                                    Ok(_) => true,
-                                    Err(e) => {
-                                        log::warn!("PostgreSQL connection pool '{key}' is unhealthy: {e}");
-                                        false
-                                    }
-                                }
-                            }
+                    },
+                    PoolKind::Postgres(p) => match p.get().await {
+                        Ok(client) => match client.simple_query("SELECT 1").await {
+                            Ok(_) => true,
                             Err(e) => {
                                 log::warn!("PostgreSQL connection pool '{key}' is unhealthy: {e}");
                                 false
                             }
+                        },
+                        Err(e) => {
+                            log::warn!("PostgreSQL connection pool '{key}' is unhealthy: {e}");
+                            false
                         }
-                    }
+                    },
                     _ => true, // Skip non-SQL pools
                 };
                 if !healthy {
@@ -596,11 +590,7 @@ impl AppState {
         // Re-establish SSH tunnels that have died
         let tunnel_connection_ids: Vec<String> = {
             let configs = self.configs.read().await;
-            configs
-                .iter()
-                .filter(|(_, c)| c.ssh_enabled && !c.ssh_host.is_empty())
-                .map(|(id, _)| id.clone())
-                .collect()
+            configs.iter().filter(|(_, c)| c.ssh_enabled && !c.ssh_host.is_empty()).map(|(id, _)| id.clone()).collect()
         };
         for connection_id in tunnel_connection_ids {
             self.tunnels.stop_tunnel(&connection_id).await;

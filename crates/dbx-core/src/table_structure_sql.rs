@@ -533,7 +533,9 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     }
 
     let Some(original) = &options.column.original else {
-        warnings.push("This column has no original state — ALTER statements are only available for existing columns.".to_string());
+        warnings.push(
+            "This column has no original state — ALTER statements are only available for existing columns.".to_string(),
+        );
         return TableStructureSqlResult { statements, warnings };
     };
 
