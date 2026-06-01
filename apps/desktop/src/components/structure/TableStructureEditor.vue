@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { uuid } from "@/lib/utils";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -97,6 +97,12 @@ const warnings = ref<string[]>([]);
 const foreignKeys = ref<ForeignKeyInfo[]>([]);
 const triggers = ref<TriggerInfo[]>([]);
 
+function isPlainModShortcut(event: KeyboardEvent, key: string): boolean {
+  if (event.isComposing || event.altKey || event.shiftKey) return false;
+  if (!event.metaKey && !event.ctrlKey) return false;
+  return event.key.toLowerCase() === key;
+}
+
 const structureDensityValues: StructureEditorDensity[] = ["compact", "standard", "comfortable"];
 const structureDensityMetrics: Record<
   StructureEditorDensity,
@@ -118,52 +124,52 @@ const structureDensityMetrics: Record<
   }
 > = {
   compact: {
-    columns: [24, 104, 120, 72, 54, 46, 92, 104, 104, 96],
-    indexes: [104, 156, 54, 78, 108, 128, 104, 62],
+    columns: [28, 120, 136, 82, 60, 52, 108, 124, 128, 108],
+    indexes: [120, 180, 60, 88, 124, 144, 120, 70],
     minColumnWidth: 24,
     minIndexColumnWidth: 48,
-    fontSize: 10,
-    shellPadding: 8,
-    cellPaddingX: 4,
-    cellPaddingY: 3,
-    headerPaddingY: 4,
-    controlHeight: 20,
-    controlPaddingX: 6,
-    iconSize: 12,
-    checkboxSize: 12,
-    lineHeight: 1.25,
-  },
-  standard: {
-    columns: [28, 128, 144, 96, 64, 56, 112, 128, 128, 128],
-    indexes: [132, 200, 64, 96, 132, 160, 132, 76],
-    minColumnWidth: 28,
-    minIndexColumnWidth: 60,
     fontSize: 11,
-    shellPadding: 12,
+    shellPadding: 10,
     cellPaddingX: 6,
     cellPaddingY: 4,
-    headerPaddingY: 6,
+    headerPaddingY: 5,
     controlHeight: 24,
     controlPaddingX: 8,
     iconSize: 14,
-    checkboxSize: 14,
+    checkboxSize: 13,
     lineHeight: 1.35,
   },
-  comfortable: {
-    columns: [32, 152, 168, 104, 76, 68, 136, 168, 152, 132],
-    indexes: [156, 232, 76, 112, 156, 192, 156, 92],
-    minColumnWidth: 32,
-    minIndexColumnWidth: 64,
+  standard: {
+    columns: [32, 144, 160, 104, 72, 64, 128, 152, 152, 136],
+    indexes: [148, 224, 72, 108, 148, 180, 148, 84],
+    minColumnWidth: 28,
+    minIndexColumnWidth: 60,
     fontSize: 12,
-    shellPadding: 14,
+    shellPadding: 12,
     cellPaddingX: 8,
-    cellPaddingY: 6,
-    headerPaddingY: 8,
+    cellPaddingY: 5,
+    headerPaddingY: 7,
     controlHeight: 28,
     controlPaddingX: 10,
     iconSize: 15,
-    checkboxSize: 15,
-    lineHeight: 1.45,
+    checkboxSize: 14,
+    lineHeight: 1.4,
+  },
+  comfortable: {
+    columns: [36, 168, 188, 116, 84, 76, 152, 188, 176, 148],
+    indexes: [176, 260, 84, 124, 176, 216, 176, 104],
+    minColumnWidth: 32,
+    minIndexColumnWidth: 64,
+    fontSize: 13,
+    shellPadding: 16,
+    cellPaddingX: 10,
+    cellPaddingY: 7,
+    headerPaddingY: 9,
+    controlHeight: 32,
+    controlPaddingX: 12,
+    iconSize: 16,
+    checkboxSize: 16,
+    lineHeight: 1.5,
   },
 };
 
@@ -346,6 +352,7 @@ const targetLabel = computed(() =>
 );
 
 let sqlPreviewRequestId = 0;
+let keydownListenerRegistered = false;
 
 async function refreshSqlPreview() {
   const requestId = ++sqlPreviewRequestId;
@@ -519,6 +526,7 @@ function canDropColumn(column: EditableStructureColumn): boolean {
 
 function addIndex() {
   if (!structureCapabilities.value.createIndex) return;
+  activeTab.value = "indexes";
   indexes.value.push({
     id: `new:${uuid()}`,
     name: "",
@@ -530,6 +538,14 @@ function addIndex() {
     includedColumns: [],
     comment: "",
     markedForDrop: false,
+  });
+  void nextTick(() => {
+    const indexRows = rootRef.value?.querySelectorAll<HTMLElement>('[data-new-index-row="true"]');
+    const row = indexRows?.[indexRows.length - 1];
+    const input = row?.querySelector<HTMLInputElement>("[data-index-name-input]");
+    row?.scrollIntoView({ block: "nearest" });
+    input?.focus();
+    input?.select();
   });
 }
 
@@ -611,9 +627,54 @@ async function applyChanges() {
   }
 }
 
+function addItemForActiveTab(): boolean {
+  if (activeTab.value === "columns" && structureCapabilities.value.addColumn) {
+    void addColumn();
+    return true;
+  }
+  if (activeTab.value === "indexes" && structureCapabilities.value.createIndex) {
+    addIndex();
+    return true;
+  }
+  return false;
+}
+
+function onStructureEditorKeydown(event: KeyboardEvent) {
+  if (isPlainModShortcut(event, "s")) {
+    event.preventDefault();
+    event.stopPropagation();
+    void applyChanges();
+    return;
+  }
+  if (isPlainModShortcut(event, "n")) {
+    event.preventDefault();
+    event.stopPropagation();
+    addItemForActiveTab();
+  }
+}
+
+function registerStructureEditorShortcuts() {
+  if (keydownListenerRegistered) return;
+  keydownListenerRegistered = true;
+  window.addEventListener("keydown", onStructureEditorKeydown);
+}
+
+function unregisterStructureEditorShortcuts() {
+  if (!keydownListenerRegistered) return;
+  keydownListenerRegistered = false;
+  window.removeEventListener("keydown", onStructureEditorKeydown);
+}
+
 onMounted(() => {
   resetState();
+  registerStructureEditorShortcuts();
   void loadStructure();
+});
+
+onActivated(registerStructureEditorShortcuts);
+onDeactivated(unregisterStructureEditorShortcuts);
+onBeforeUnmount(() => {
+  unregisterStructureEditorShortcuts();
 });
 
 watch(
@@ -684,8 +745,8 @@ watch(
       {{ t("common.loading") }}
     </div>
 
-    <div v-else class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px] gap-2 overflow-hidden">
-      <div class="min-h-0 min-w-0 overflow-hidden rounded-md border">
+    <div v-else class="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
+      <div class="min-h-0 min-w-0 flex-1 overflow-hidden rounded-md border">
         <Tabs v-model="activeTab" class="flex h-full min-h-0 flex-col">
           <div class="flex shrink-0 items-center justify-between gap-2 border-b px-2 py-[var(--structure-header-py)]">
             <TabsList>
@@ -911,16 +972,15 @@ watch(
                       </template>
                       <!-- PostgreSQL: IDENTITY -->
                       <template v-else-if="databaseType === 'postgres'">
-                        <select
-                          :value="column.extra.identity?.generation ?? ''"
-                          class="h-[var(--structure-control-height)] rounded border bg-background px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]"
-                          @change="
-                            (e) => {
-                              const v = (e.target as HTMLSelectElement).value;
-                              if (v) {
+                        <Select
+                          :model-value="column.extra.identity?.generation ?? 'none'"
+                          @update:model-value="
+                            (value: any) => {
+                              const generation = String(value ?? '');
+                              if (generation && generation !== 'none') {
                                 column.extra.identity = {
                                   ...column.extra.identity,
-                                  generation: v as 'BY DEFAULT' | 'ALWAYS',
+                                  generation: generation as 'BY DEFAULT' | 'ALWAYS',
                                 };
                               } else {
                                 column.extra.identity = undefined;
@@ -928,10 +988,17 @@ watch(
                             }
                           "
                         >
-                          <option value="">{{ t("structureEditor.no") }}</option>
-                          <option value="BY DEFAULT">BY DEFAULT</option>
-                          <option value="ALWAYS">ALWAYS</option>
-                        </select>
+                          <SelectTrigger
+                            class="h-[var(--structure-control-height)] w-28 rounded-md px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">{{ t("structureEditor.no") }}</SelectItem>
+                            <SelectItem value="BY DEFAULT">BY DEFAULT</SelectItem>
+                            <SelectItem value="ALWAYS">ALWAYS</SelectItem>
+                          </SelectContent>
+                        </Select>
                         <template v-if="column.extra.identity?.generation">
                           <Input
                             :model-value="column.extra.identity.seed?.toString() ?? ''"
@@ -1081,9 +1148,15 @@ watch(
                   v-for="index in indexes"
                   :key="index.id"
                   :class="index.markedForDrop ? 'bg-destructive/5 opacity-60' : ''"
+                  :data-new-index-row="!index.original ? 'true' : undefined"
                 >
                   <td :class="structureCellClass">
-                    <Input v-model="index.name" :class="structureControlClass" :disabled="!canEditIndexDraft(index)" />
+                    <Input
+                      v-model="index.name"
+                      :class="structureControlClass"
+                      :disabled="!canEditIndexDraft(index)"
+                      data-index-name-input
+                    />
                   </td>
                   <td :class="[structureCellClass, 'overflow-hidden']">
                     <DropdownMenu v-if="canEditIndexDraft(index)">
@@ -1282,7 +1355,7 @@ watch(
         </Tabs>
       </div>
 
-      <div class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-md border">
+      <div class="flex h-[28%] min-h-40 min-w-0 max-h-64 shrink-0 flex-col overflow-hidden rounded-md border">
         <div
           class="flex shrink-0 items-center justify-between border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] font-medium"
         >
@@ -1302,7 +1375,7 @@ watch(
             <span v-else>{{ pendingStatements.length }}</span>
           </Badge>
         </div>
-        <div class="min-h-0 flex-1 overflow-auto p-2">
+        <div class="min-h-0 flex-1 overflow-auto p-2.5">
           <div v-if="warnings.length" class="mb-2 space-y-1">
             <div
               v-for="warning in warnings"
@@ -1315,7 +1388,7 @@ watch(
           </div>
           <pre
             v-if="pendingStatements.length"
-            class="whitespace-pre-wrap break-words rounded-md bg-muted/40 p-[var(--structure-cell-px)] font-mono text-[length:var(--structure-font-size)] leading-4"
+            class="whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2.5 font-mono text-[calc(var(--structure-font-size)+1px)] leading-5"
             v-html="highlightedSql"
           />
           <div

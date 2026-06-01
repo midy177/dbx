@@ -106,6 +106,20 @@ test("parses PostgreSQL extra string to ColumnExtra", () => {
   assert.deepEqual(parseExtraToColumnExtra("GENERATED ALWAYS AS IDENTITY", "postgres"), {
     identity: { generation: "ALWAYS" },
   });
+  assert.deepEqual(parseExtraToColumnExtra("generated always as identity (start with 10 increment by 2)", "postgres"), {
+    identity: { generation: "ALWAYS", seed: 10, increment: 2 },
+  });
+});
+
+test("parses SQL Server identity extra string to ColumnExtra", () => {
+  assert.deepEqual(parseExtraToColumnExtra("identity(1,1)", "sqlserver"), {
+    autoIncrement: true,
+    identity: { seed: 1, increment: 1 },
+  });
+  assert.deepEqual(parseExtraToColumnExtra("IDENTITY(100, 5)", "sqlserver"), {
+    autoIncrement: true,
+    identity: { seed: 100, increment: 5 },
+  });
 });
 
 test("creates editable index drafts and splits pasted column lists", () => {

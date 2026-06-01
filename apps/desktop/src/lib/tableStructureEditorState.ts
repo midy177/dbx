@@ -297,13 +297,25 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
   } else if (databaseType === "postgres") {
     const identityMatch = lower.match(/generated\s+(by\s+default|always)\s+as\s+identity/i);
     if (identityMatch) {
+      const sequenceMatch = lower.match(/start\s+with\s*(-?\d+)\s+increment\s+by\s*(-?\d+)/i);
       result.identity = {
         generation: identityMatch[1].toUpperCase() === "BY DEFAULT" ? "BY DEFAULT" : "ALWAYS",
       };
+      if (sequenceMatch) {
+        result.identity.seed = Number(sequenceMatch[1]);
+        result.identity.increment = Number(sequenceMatch[2]);
+      }
     }
   } else if (databaseType === "sqlserver") {
     if (lower.includes("identity")) {
       result.autoIncrement = true;
+      const identityMatch = lower.match(/identity\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)/i);
+      if (identityMatch) {
+        result.identity = {
+          seed: Number(identityMatch[1]),
+          increment: Number(identityMatch[2]),
+        };
+      }
     }
   }
 

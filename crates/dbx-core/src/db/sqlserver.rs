@@ -440,8 +440,8 @@ pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str
                 is_nullable: row.get::<&str, _>(2).unwrap_or("NO") == "YES",
                 column_default: row.get::<&str, _>(3).map(|s| s.to_string()),
                 is_primary_key: row.get::<i32, _>(4).unwrap_or(0) == 1,
-                extra: None,
-                comment: row.get::<&str, _>(9).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
+                extra: row.get::<&str, _>(9).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
+                comment: row.get::<&str, _>(10).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
                 numeric_precision: num_prec,
                 numeric_scale: num_scale,
                 character_maximum_length: max_len,
@@ -457,11 +457,13 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
          CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
          c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, c.DATETIME_PRECISION, \
+         ident.extra AS COLUMN_EXTRA, \
          ep.value AS COLUMN_COMMENT \
          FROM INFORMATION_SCHEMA.COLUMNS c \
          LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu \
            ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA AND c.TABLE_NAME = kcu.TABLE_NAME AND c.COLUMN_NAME = kcu.COLUMN_NAME \
            AND kcu.CONSTRAINT_NAME IN (SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS WHERE CONSTRAINT_TYPE = 'PRIMARY KEY' AND TABLE_SCHEMA = '{s}' AND TABLE_NAME = '{t}') \
+         OUTER APPLY (SELECT 'identity(' + CONVERT(VARCHAR(38), ic.seed_value) + ',' + CONVERT(VARCHAR(38), ic.increment_value) + ')' AS extra FROM sys.identity_columns ic WHERE ic.object_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) AND ic.name = c.COLUMN_NAME) ident \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')) AND ep.minor_id = COLUMNPROPERTY(OBJECT_ID(QUOTENAME('{s}') + '.' + QUOTENAME('{t}')), c.COLUMN_NAME, 'ColumnId') AND ep.name = N'MS_Description') ep \
          WHERE c.TABLE_SCHEMA = '{s}' AND c.TABLE_NAME = '{t}' \
          ORDER BY c.ORDINAL_POSITION"
@@ -805,6 +807,7 @@ mod tests {
 
         assert!(columns_sql.contains("TABLE_SCHEMA = 'd''bo'"));
         assert!(columns_sql.contains("TABLE_NAME = 't''able'"));
+        assert!(columns_sql.contains("sys.identity_columns"));
         assert!(indexes_sql.contains("OBJECT_ID('d''bo.t''able')"));
     }
 
