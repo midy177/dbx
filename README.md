@@ -251,6 +251,17 @@ pnpm dev:backend   # backend
 pnpm tauri build
 ```
 
+#### Docker image build
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  --push \
+  -t hub.yeastardigital.com/novo-middleware/dbx:latest \
+  -f deploy/Dockerfile \
+  --build-arg BUILDPLATFORM=linux/amd64 \
+  .
+```
+
 The installer will be in `src-tauri/target/release/bundle/`.
 
 ## Tech Stack
