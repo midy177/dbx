@@ -4,7 +4,7 @@ mod routes;
 mod sse;
 mod state;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -73,7 +73,7 @@ async fn main() {
         app: app_state,
         data_dir,
         password_hash: RwLock::new(password_hash),
-        sessions: RwLock::new(HashSet::new()),
+        sessions: RwLock::new(HashMap::new()),
         sse_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
@@ -342,6 +342,18 @@ async fn main() {
     tracing::info!("DBX Web server starting on http://{}", addr);
     if std::env::var("DBX_PASSWORD").is_ok() {
         tracing::info!("Password protection is enabled");
+    }
+
+    // Background task: purge expired sessions every hour
+    {
+        let state = web_state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            loop {
+                interval.tick().await;
+                state.purge_expired_sessions().await;
+            }
+        });
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");

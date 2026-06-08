@@ -849,6 +849,12 @@ function onLoginSuccess() {
   initApp();
 }
 
+async function onLogout() {
+  await fetch("/api/auth/logout", { method: "POST" });
+  authenticated.value = false;
+  window.history.replaceState(null, "", "/login");
+}
+
 function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
@@ -1000,6 +1006,7 @@ onUnmounted(() => {
           :agent-driver-update-count="toolbarAgentDriverUpdateCount"
           :has-connections="connectionStore.connections.length > 0"
           :has-sql-file-connections="hasSqlFileConnections"
+          :needs-auth="needsAuth"
           @new-connection="showConnectionDialog = true"
           @new-query="newQuery"
           @set-theme-mode="setThemeMode"
@@ -1013,6 +1020,7 @@ onUnmounted(() => {
           @open-sql-file="dialogs.showSqlFileDialog.value = true"
           @open-schema-diff="dialogs.showSchemaDiffDialog.value = true"
           @open-data-compare="dialogs.showDataCompareDialog.value = true"
+          @logout="onLogout"
         />
 
         <div

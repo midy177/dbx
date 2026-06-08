@@ -78,7 +78,7 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     }
 
     let token = uuid::Uuid::new_v4().to_string();
-    state.sessions.write().await.insert(token.clone());
+    state.sessions.write().await.insert(token.clone(), std::time::Instant::now());
 
     let cookie = format!("dbx_session={token}; Path=/; HttpOnly; SameSite=Lax");
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
@@ -108,7 +108,7 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 
     // Auto-login: create session
     let token = uuid::Uuid::new_v4().to_string();
-    state.sessions.write().await.insert(token.clone());
+    state.sessions.write().await.insert(token.clone(), std::time::Instant::now());
 
     let cookie = format!("dbx_session={token}; Path=/; HttpOnly; SameSite=Lax");
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
@@ -120,7 +120,7 @@ pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::
         return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true });
     }
     let authenticated = match extract_session_token(&req) {
-        Some(token) => state.sessions.read().await.contains(&token),
+        Some(token) => state.is_session_valid(&token).await,
         None => false,
     };
     Json(AuthCheckResponse { authenticated, required: true, setup_required: false })
@@ -202,7 +202,7 @@ pub async fn auth_middleware(
 
     // Check session token
     if let Some(token) = extract_session_token(&req) {
-        if state.sessions.read().await.contains(&token) {
+        if state.is_session_valid(&token).await {
             return next.run(req).await;
         }
     }

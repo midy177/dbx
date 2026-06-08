@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dbx
+  labels:
+    app: dbx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dbx
+  template:
+    metadata:
+      labels:
+        app: dbx
+    spec:
+      containers:
+        - name: dbx
+          image: hub.yeastardigital.com/novo-middleware/dbx:latest
+          command: ["/bin/sh"]
+          args: ["/scripts/init-connections.sh"]
+          ports:
+            - name: http
+              containerPort: 4224
+              protocol: TCP
+          env:
+            - name: DBX_DATA_DIR
+              value: /app/data
+            - name: DBX_STATIC_DIR
+              value: /app/static
+            - name: DBX_SESSION_TTL_HOURS
+              value: "12"
+            - name: DBX_PASSWORD
+              value: "x1UaPfrkFkUs9DwP"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: init-scripts
+              mountPath: /scripts
+          livenessProbe:
+            httpGet:
+              path: /api/auth/check
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/auth/check
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init-scripts
+          configMap:
+            name: dbx-init-scripts
+            defaultMode: 0755

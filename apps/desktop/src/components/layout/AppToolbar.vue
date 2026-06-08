@@ -18,6 +18,7 @@ import {
   Settings,
   CloudDownload,
   Package,
+  LogOut,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -40,6 +41,7 @@ const props = defineProps<{
   agentDriverUpdateCount: number;
   hasConnections: boolean;
   hasSqlFileConnections: boolean;
+  needsAuth: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -56,6 +58,7 @@ const emit = defineEmits<{
   "open-sql-file": [];
   "open-schema-diff": [];
   "open-data-compare": [];
+  "logout": [];
 }>();
 
 const { t } = useI18n();
@@ -289,6 +292,15 @@ function onToolbarDblClick(e: MouseEvent) {
         </Button>
       </TooltipTrigger>
       <TooltipContent>{{ t("settings.title") }}</TooltipContent>
+    </Tooltip>
+
+    <Tooltip v-if="needsAuth">
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="h-8 w-8" @click="emit('logout')">
+          <LogOut class="h-4 w-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{{ t("auth.logout") }}</TooltipContent>
     </Tooltip>
 
     <WindowControls

@@ -21,6 +21,7 @@ export default {
     passwordChanged: "Password changed successfully",
     changePasswordFailed: "Failed to change password",
     changePasswordDescription: "Enter your current password and choose a new one",
+    logout: "Logout",
   },
   toolbar: {
     newConnection: "New Connection",

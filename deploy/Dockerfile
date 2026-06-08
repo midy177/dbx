@@ -37,9 +37,9 @@ COPY src-tauri/build.rs src-tauri/
 COPY src-tauri/tauri.conf.json src-tauri/
 
 RUN case "$TARGETARCH" in \
-      amd64) rust_target=x86_64-unknown-linux-gnu; lib_arch=x86_64-linux-gnu ;; \
-      arm64) rust_target=aarch64-unknown-linux-gnu; lib_arch=aarch64-linux-gnu ;; \
-      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    amd64) rust_target=x86_64-unknown-linux-gnu; lib_arch=x86_64-linux-gnu ;; \
+    arm64) rust_target=aarch64-unknown-linux-gnu; lib_arch=aarch64-linux-gnu ;; \
+    *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac && \
     LIBRARY_PATH="/usr/lib/$lib_arch" \
     PKG_CONFIG_PATH="/usr/lib/$lib_arch/pkgconfig" \
@@ -56,9 +56,9 @@ COPY crates/ crates/
 RUN find crates/ -name '*.rs' -exec touch {} +
 
 RUN case "$TARGETARCH" in \
-      amd64) rust_target=x86_64-unknown-linux-gnu; lib_arch=x86_64-linux-gnu ;; \
-      arm64) rust_target=aarch64-unknown-linux-gnu; lib_arch=aarch64-linux-gnu ;; \
-      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    amd64) rust_target=x86_64-unknown-linux-gnu; lib_arch=x86_64-linux-gnu ;; \
+    arm64) rust_target=aarch64-unknown-linux-gnu; lib_arch=aarch64-linux-gnu ;; \
+    *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac && \
     LIBRARY_PATH="/usr/lib/$lib_arch" \
     PKG_CONFIG_PATH="/usr/lib/$lib_arch/pkgconfig" \
@@ -77,6 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
     libfreetype6 \
     libssl3 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=backend /out/${TARGETPLATFORM}/dbx-web /usr/local/bin/
 COPY --from=frontend /app/dist /app/static

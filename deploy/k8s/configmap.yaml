@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dbx-init-scripts
+data:
+  init-connections.sh: |
+    #!/bin/sh
+    set -e
+
+    # ============================================================
+    # 连接配置 — 按实际情况修改以下变量
+    # ============================================================
+
+    # DBX_PASSWORD 从 deployment env 注入，此处不设置
+    # --- PostgreSQL ---
+    PG_ID="auto-init-pg"
+    PG_NAME="PostgreSQL"
+    PG_HOST="postgres-rw.middleware.svc.cluster.local"
+    PG_PORT=5432
+    PG_USER="postgres"
+    PG_PASSWORD=""
+    PG_DATABASE="postgres"
+
+    # --- Redis 模式：standalone | sentinel | cluster ---
+    REDIS_MODE="standalone"
+    REDIS_NAME="Redis"
+    REDIS_PASSWORD=""
+
+    # standalone 直连
+    REDIS_HOST="valkey.middleware.svc.cluster.local"
+    REDIS_PORT=6379
+
+    # sentinel 哨兵（REDIS_MODE=sentinel 时生效）
+    REDIS_SENTINEL_NODES="sentinel-0:26379,sentinel-1:26379,sentinel-2:26379"
+    REDIS_SENTINEL_MASTER="mymaster"
+    REDIS_SENTINEL_USERNAME=""
+    REDIS_SENTINEL_PASSWORD=""
+    REDIS_SENTINEL_TLS=false
+
+    # cluster 集群（REDIS_MODE=cluster 时生效）
+    REDIS_CLUSTER_NODES="node-0:6379,node-1:6379,node-2:6379"
+
+    # ============================================================
+
+    DBX_PID=""
+    cleanup() {
+      [ -n "$DBX_PID" ] && kill "$DBX_PID" 2>/dev/null
+    }
+    trap cleanup TERM INT
+
+    dbx-web &
+    DBX_PID=$!
+
+    echo "[init] waiting for dbx-web to start..."
+    until curl -sf -o /dev/null http://localhost:4224/api/auth/check; do
+      sleep 1
+    done
+    echo "[init] dbx-web is ready"
+
+    COOKIES=$(mktemp)
+
+    if [ -n "$DBX_PASSWORD" ]; then
+      curl -sf -c "$COOKIES" \
+        -X POST http://localhost:4224/api/auth/login \
+        -H "Content-Type: application/json" \
+        -d "{\"password\":\"$DBX_PASSWORD\"}" > /dev/null
+    fi
+
+    CONFIGS="[]"
+
+    # PostgreSQL
+    PG_CFG=$(printf '{"id":"%s","name":"%s","db_type":"postgres","host":"%s","port":%s,"username":"%s","password":"%s","database":"%s"}' \
+      "$PG_ID" "$PG_NAME" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_PASSWORD" "$PG_DATABASE")
+    CONFIGS="[$PG_CFG]"
+    echo "[init] added PostgreSQL: $PG_HOST:$PG_PORT"
+
+    # Redis
+    case "$REDIS_MODE" in
+      sentinel)
+        REDIS_CFG=$(printf '{"id":"auto-init-redis","name":"%s (Sentinel)","db_type":"redis","host":"","port":6379,"username":"","password":"%s","database":null,"redis_connection_mode":"sentinel","redis_sentinel_master":"%s","redis_sentinel_nodes":"%s","redis_sentinel_username":"%s","redis_sentinel_password":"%s","redis_sentinel_tls":%s}' \
+          "$REDIS_NAME" "$REDIS_PASSWORD" "$REDIS_SENTINEL_MASTER" "$REDIS_SENTINEL_NODES" \
+          "$REDIS_SENTINEL_USERNAME" "$REDIS_SENTINEL_PASSWORD" "$REDIS_SENTINEL_TLS")
+        echo "[init] added Redis Sentinel: master=$REDIS_SENTINEL_MASTER"
+        ;;
+      cluster)
+        REDIS_CFG=$(printf '{"id":"auto-init-redis","name":"%s (Cluster)","db_type":"redis","host":"","port":6379,"username":"","password":"%s","database":null,"redis_connection_mode":"cluster","redis_cluster_nodes":"%s"}' \
+          "$REDIS_NAME" "$REDIS_PASSWORD" "$REDIS_CLUSTER_NODES")
+        echo "[init] added Redis Cluster: $REDIS_CLUSTER_NODES"
+        ;;
+      *)
+        REDIS_CFG=$(printf '{"id":"auto-init-redis","name":"%s","db_type":"redis","host":"%s","port":%s,"username":"","password":"%s","database":null,"redis_connection_mode":"standalone"}' \
+          "$REDIS_NAME" "$REDIS_HOST" "$REDIS_PORT" "$REDIS_PASSWORD")
+        echo "[init] added Redis standalone: $REDIS_HOST:$REDIS_PORT"
+        ;;
+    esac
+    CONFIGS="[$PG_CFG,$REDIS_CFG]"
+
+    echo "[init] saving connections..."
+    SAVE_RESP=$(curl -s -w "\n%{http_code}" -b "$COOKIES" \
+      -X POST http://localhost:4224/api/connection/save \
+      -H "Content-Type: application/json" \
+      -d "{\"configs\":$CONFIGS}")
+    HTTP_CODE=$(printf '%s' "$SAVE_RESP" | tail -1)
+    BODY=$(printf '%s' "$SAVE_RESP" | head -1)
+    echo "[init] save response: $HTTP_CODE $BODY"
+    if [ "$HTTP_CODE" != "200" ]; then
+      echo "[init] ERROR: failed to save connections (HTTP $HTTP_CODE)"
+      exit 1
+    fi
+    echo "[init] connection configs saved"
+
+    rm -f "$COOKIES"
+    wait "$DBX_PID"
