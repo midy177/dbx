@@ -31,7 +31,7 @@ spec:
             - name: DBX_SESSION_TTL_HOURS
               value: "12"
             - name: DBX_PASSWORD
-              value: ""
+              value: "ZpFoJGrche4lrUj0"
           volumeMounts:
             - name: data
               mountPath: /app/data
