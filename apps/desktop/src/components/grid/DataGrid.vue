@@ -1,6 +1,20 @@
 <script lang="ts">
 import { ref, shallowRef } from "vue";
 const globalDdlOpen = ref(false);
+type CachedStructuredFilterRule = {
+  id: string;
+  columnName: string;
+  mode: "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than";
+  rawValue: string;
+  conjunction: "AND" | "OR";
+};
+type StructuredFilterCacheState = {
+  scopeKey: string;
+  manualWhereInput: string;
+  rules: CachedStructuredFilterRule[];
+  appliedWhereInput: string;
+};
+const structuredFilterStateCache = new Map<string, StructuredFilterCacheState>();
 </script>
 
 <script setup lang="ts">
@@ -426,8 +440,6 @@ const headerPanelDismissGuardUntil = ref(0);
 const localFilterSearch = ref("");
 const localFilterDraft = ref<LocalColumnFilterDraft | null>(null);
 const filterBuilderOpen = ref(false);
-const structuredFilterRules = ref<StructuredFilterRule[]>([]);
-const appliedStructuredWhereInput = ref("");
 const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
@@ -440,6 +452,10 @@ const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
 ];
 const filterBuilderColumns = computed(() => props.tableMeta?.columns ?? []);
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
+const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
+const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
+const structuredFilterRules = ref<StructuredFilterRule[]>([]);
+const appliedStructuredWhereInput = ref("");
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !!rule.columnName && (!filterModeNeedsValue(rule.mode) || rule.rawValue.trim().length > 0)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 const formatterOpenColumn = ref<number | null>(null);
@@ -861,6 +877,38 @@ function defaultStructuredFilterRule(): StructuredFilterRule {
   };
 }
 
+function cloneStructuredFilterRules(rules: StructuredFilterRule[]): StructuredFilterRule[] {
+  return rules.map((rule) => ({ ...rule }));
+}
+
+function cachedStructuredFilterState(): StructuredFilterCacheState | undefined {
+  const cached = structuredFilterStateCache.get(structuredFilterCacheKey.value);
+  return cached?.scopeKey === structuredFilterScopeKey.value ? cached : undefined;
+}
+
+function persistStructuredFilterState() {
+  structuredFilterStateCache.set(structuredFilterCacheKey.value, {
+    scopeKey: structuredFilterScopeKey.value,
+    manualWhereInput: whereFilterInput.value,
+    rules: cloneStructuredFilterRules(structuredFilterRules.value),
+    appliedWhereInput: appliedStructuredWhereInput.value,
+  });
+}
+
+function loadStructuredFilterStateForScope() {
+  const cached = cachedStructuredFilterState();
+  if (cached) {
+    structuredFilterRules.value = cloneStructuredFilterRules(cached.rules);
+    appliedStructuredWhereInput.value = cached.appliedWhereInput;
+    whereFilterInput.value = cached.manualWhereInput;
+    nextTick(() => emit("update:whereInput", currentWhereInput() ?? ""));
+    return;
+  }
+  appliedStructuredWhereInput.value = "";
+  structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
+  persistStructuredFilterState();
+}
+
 function ensureStructuredFilterRule() {
   if (structuredFilterRules.value.length === 0 && filterBuilderColumnOptions.value.length > 0) {
     structuredFilterRules.value = [defaultStructuredFilterRule()];
@@ -966,21 +1014,19 @@ async function applyStructuredFilters() {
   await applyWhereFilter();
 }
 
+watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
+
 watch(
-  filterBuilderColumnOptions,
-  (columns) => {
-    if (columns.length === 0) {
-      structuredFilterRules.value = [];
-      appliedStructuredWhereInput.value = "";
+  [structuredFilterRules, appliedStructuredWhereInput],
+  () => {
+    const columns = filterBuilderColumnOptions.value;
+    if (columns.length > 0 && structuredFilterRules.value.some((rule) => !columns.includes(rule.columnName))) {
+      structuredFilterRules.value = structuredFilterRules.value.map((rule) => (columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] ?? "" }));
       return;
     }
-    if (structuredFilterRules.value.length === 0) {
-      structuredFilterRules.value = [defaultStructuredFilterRule()];
-      return;
-    }
-    structuredFilterRules.value = structuredFilterRules.value.map((rule) => (columns.includes(rule.columnName) ? rule : { ...rule, columnName: columns[0] ?? "" }));
+    persistStructuredFilterState();
   },
-  { immediate: true },
+  { deep: true },
 );
 
 function updateSuggestionPosition() {
@@ -1170,7 +1216,8 @@ function navigateWhereSuggestion(delta: number) {
 }
 
 watch(whereFilterInput, (val) => {
-  emit("update:whereInput", val);
+  emit("update:whereInput", currentWhereInput() ?? "");
+  persistStructuredFilterState();
   whereSuggestions.value = [];
   if (!props.tableMeta?.columns?.length) return;
   const trimmed = val.trim();
@@ -3089,6 +3136,7 @@ async function applyWhereFilter() {
   isApplyingWhere.value = true;
   saveError.value = "";
   currentPage.value = 1;
+  emit("update:whereInput", currentWhereInput() ?? "");
   try {
     const tableMeta = await waitForTableMeta();
     if (!tableMeta) return;
