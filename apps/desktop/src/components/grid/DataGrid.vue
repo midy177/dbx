@@ -7450,13 +7450,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .data-grid-topbar-scroll {
   scrollbar-width: thin;
+  scrollbar-gutter: stable;
 }
 
 .data-grid-scroller {
   overflow-anchor: none;
   scrollbar-gutter: stable;
   will-change: scroll-position;
-  contain: strict;
+  contain: layout style paint;
 }
 
 .data-grid-scroller :deep(.vue-recycle-scroller__item-wrapper) {
@@ -7487,6 +7488,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .transpose-grid-scroller {
   overflow-anchor: none;
+  scrollbar-gutter: stable;
   will-change: scroll-position;
 }
 
