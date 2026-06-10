@@ -181,7 +181,7 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
 
 async function collectSqlFilesRecursively(dir: string): Promise<string[]> {
   const { readDir } = await import("@tauri-apps/plugin-fs");
-  const { join, extname } = await import("@tauri-apps/api/path");
+  const { join } = await import("@tauri-apps/api/path");
 
   const results: string[] = [];
   for (const entry of await readDir(dir)) {
@@ -191,7 +191,7 @@ async function collectSqlFilesRecursively(dir: string): Promise<string[]> {
       continue;
     }
     if (!entry.isFile) continue;
-    if ((await extname(fullPath)).toLowerCase() !== ".sql") continue;
+    if (!fullPath.toLowerCase().endsWith(".sql")) continue;
     results.push(fullPath);
   }
   return results;
