@@ -190,6 +190,7 @@ export const useQueryStore = defineStore("query", () => {
   const restored = loadSavedTabs();
   const tabs = ref<QueryTab[]>(restored.tabs);
   const activeTabId = ref<string | null>(restored.activeTabId);
+  const activeTabHistory = ref<string[]>(restored.activeTabId ? [restored.activeTabId] : []);
   const showCloseConfirm = ref(false);
   const pendingCloseTabId = ref<string | null>(null);
   const pendingBatchCloseTabIds = ref<string[] | null>(null);
@@ -866,7 +867,7 @@ export const useQueryStore = defineStore("query", () => {
     clearResultPayload(tabs.value[idx]);
     tabs.value.splice(idx, 1);
     if (activeTabId.value === id) {
-      activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.id ?? null;
+      activeTabId.value = fallbackActiveTabAfterClose(id, idx);
     }
     if (force) resumePendingBatchCloseAfter(id);
   }
@@ -2246,9 +2247,28 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  watch(activeTabId, (id) => {
-    touchResult(tabs.value.find((tab) => tab.id === id));
-  });
+  function rememberActiveTab(id: string | null) {
+    if (!id || !tabs.value.some((tab) => tab.id === id)) return;
+    activeTabHistory.value = [...activeTabHistory.value.filter((tabId) => tabId !== id), id];
+  }
+
+  function fallbackActiveTabAfterClose(closedId: string, closedIndex: number): string | null {
+    const remainingIds = new Set(tabs.value.map((tab) => tab.id));
+    // Prefer the most recently focused remaining tab. This preserves the
+    // source query tab when a transient table-info/data tab is closed.
+    const history = activeTabHistory.value.filter((tabId) => tabId !== closedId && remainingIds.has(tabId));
+    activeTabHistory.value = history;
+    return [...history].reverse().find((tabId) => remainingIds.has(tabId)) ?? tabs.value[Math.min(closedIndex, tabs.value.length - 1)]?.id ?? null;
+  }
+
+  watch(
+    activeTabId,
+    (id) => {
+      rememberActiveTab(id);
+      touchResult(tabs.value.find((tab) => tab.id === id));
+    },
+    { flush: "sync" },
+  );
 
   function restoreCachedResultPayload(tab: QueryTab, snapshot: Awaited<ReturnType<typeof readTabResultSnapshot>>) {
     if (!snapshot) return false;
