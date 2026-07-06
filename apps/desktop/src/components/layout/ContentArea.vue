@@ -3,7 +3,7 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
+import { Check, Columns3, EyeOff, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Timer, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, Rows3, SquareDashed, Minus, Plus } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -301,6 +301,11 @@ const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
 const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
+const QUERY_RESULT_AUTO_REFRESH_INTERVAL_OPTIONS = [5, 10, 30, 60, 300];
+const queryResultAutoRefreshIntervalSeconds = ref(10);
+const queryResultAutoRefreshEnabled = ref(false);
+let queryResultAutoRefreshTimer: ReturnType<typeof setInterval> | undefined;
+const queryResultAutoRefreshLabel = computed(() => (queryResultAutoRefreshEnabled.value ? t("tabs.autoRefreshEvery", { seconds: queryResultAutoRefreshIntervalSeconds.value }) : t("tabs.autoRefresh")));
 watch(
   () => visibleResultItems.value.map((item) => item.index).join(","),
   () => {
@@ -372,6 +377,7 @@ const resultsPaneOpen = ref(false);
 const resultsPaneSize = ref(Number(safeLocalStorageGet("dbx-results-pane-size")) || DEFAULT_QUERY_RESULTS_PANE_SIZE);
 const editorPaneSize = computed(() => (resultsPaneOpen.value ? 100 - resultsPaneSize.value : 100));
 const queryRunningElapsed = ref(0);
+const canAutoRefreshQueryResult = computed(() => props.activeTab.mode === "query" && props.activeOutputView === "result" && resultsPaneOpen.value && hasTabularResult.value && !props.activeTab.isExecuting);
 
 function onResultsResized(payload: { panes: { size: number }[] }) {
   const resultsPane = payload.panes[1];
@@ -413,7 +419,27 @@ watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.qu
 
 onUnmounted(() => {
   stopQueryRunningElapsedTimer();
+  stopQueryResultAutoRefreshTimer();
   window.removeEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
+});
+
+watch(() => props.activeTab.id, stopQueryResultAutoRefresh);
+
+watch(
+  () => [props.activeOutputView, resultsPaneOpen.value] as const,
+  ([outputView, paneOpen]) => {
+    if (outputView !== "result" || !paneOpen) stopQueryResultAutoRefresh();
+  },
+);
+
+watch(canAutoRefreshQueryResult, (canRefresh) => {
+  if (!queryResultAutoRefreshEnabled.value) return;
+  if (canRefresh) restartQueryResultAutoRefreshTimer();
+  else stopQueryResultAutoRefreshTimer();
+});
+
+watch(activeQueryError, (message) => {
+  if (message && queryResultAutoRefreshEnabled.value) stopQueryResultAutoRefresh();
 });
 
 watch(
@@ -598,6 +624,37 @@ function focusSearch(): boolean {
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;
   return dataGridRef.value?.focusSearch() ?? false;
+}
+
+function stopQueryResultAutoRefreshTimer() {
+  clearInterval(queryResultAutoRefreshTimer);
+  queryResultAutoRefreshTimer = undefined;
+}
+
+function runQueryResultAutoRefreshTick() {
+  if (!queryResultAutoRefreshEnabled.value || !canAutoRefreshQueryResult.value) return;
+  refreshData();
+}
+
+function restartQueryResultAutoRefreshTimer() {
+  stopQueryResultAutoRefreshTimer();
+  if (!queryResultAutoRefreshEnabled.value || !canAutoRefreshQueryResult.value) return;
+  queryResultAutoRefreshTimer = setInterval(runQueryResultAutoRefreshTick, queryResultAutoRefreshIntervalSeconds.value * 1000);
+}
+
+function setQueryResultAutoRefreshInterval(seconds: number) {
+  queryResultAutoRefreshIntervalSeconds.value = seconds;
+  if (queryResultAutoRefreshEnabled.value) restartQueryResultAutoRefreshTimer();
+}
+
+function toggleQueryResultAutoRefresh() {
+  queryResultAutoRefreshEnabled.value = !queryResultAutoRefreshEnabled.value;
+  restartQueryResultAutoRefreshTimer();
+}
+
+function stopQueryResultAutoRefresh() {
+  queryResultAutoRefreshEnabled.value = false;
+  stopQueryResultAutoRefreshTimer();
 }
 
 function refreshData(): boolean {
@@ -933,11 +990,41 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                     </div>
                   </PopoverContent>
                 </Popover>
-                <Button v-if="activeOutputView === 'result' && hasTabularResult" variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="activeTab.isExecuting" @click="refreshData">
-                  <Loader2 v-if="activeTab.isExecuting" class="h-3.5 w-3.5 animate-spin" />
-                  <RefreshCcw v-else class="h-3.5 w-3.5" />
-                  {{ t("grid.refresh") }}
-                </Button>
+                <div v-if="activeOutputView === 'result' && hasTabularResult" class="flex h-6 shrink-0 items-center">
+                  <Button variant="ghost" size="sm" class="h-6 rounded-r-none gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="activeTab.isExecuting" @click="refreshData">
+                    <Loader2 v-if="activeTab.isExecuting" class="h-3.5 w-3.5 animate-spin" />
+                    <RefreshCcw v-else class="h-3.5 w-3.5" />
+                    {{ t("grid.refresh") }}
+                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger as-child>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        class="h-6 rounded-l-none border-l border-border/60 px-1.5 text-xs"
+                        :class="queryResultAutoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground'"
+                        :title="queryResultAutoRefreshLabel"
+                        :aria-label="queryResultAutoRefreshLabel"
+                        :aria-pressed="queryResultAutoRefreshEnabled"
+                      >
+                        <Timer class="h-3.5 w-3.5" />
+                        <span class="tabular-nums">{{ queryResultAutoRefreshEnabled ? `${queryResultAutoRefreshIntervalSeconds}s` : t("tabs.autoRefreshShort") }}</span>
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" class="w-40">
+                      <DropdownMenuItem class="gap-2" @select="toggleQueryResultAutoRefresh">
+                        <Check v-if="queryResultAutoRefreshEnabled" class="h-3.5 w-3.5" />
+                        <span v-else class="h-3.5 w-3.5" />
+                        {{ queryResultAutoRefreshEnabled ? t("tabs.stopAutoRefresh") : t("tabs.startAutoRefresh") }}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem v-for="seconds in QUERY_RESULT_AUTO_REFRESH_INTERVAL_OPTIONS" :key="seconds" class="gap-2" @select="setQueryResultAutoRefreshInterval(seconds)">
+                        <Check v-if="queryResultAutoRefreshIntervalSeconds === seconds" class="h-3.5 w-3.5" />
+                        <span v-else class="h-3.5 w-3.5" />
+                        {{ t("tabs.autoRefreshEvery", { seconds }) }}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
                 <Button variant="ghost" size="sm" class="h-6 shrink-0 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" @click="resultsPaneOpen = false">
                   <ChevronDown class="h-3.5 w-3.5" />
                   {{ t("editor.hideResultsPane") }}
