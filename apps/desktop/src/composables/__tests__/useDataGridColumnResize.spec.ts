@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed } from "vue";
 import { describe, expect, it } from "vitest";
 import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH } from "@/lib/dataGrid/dataGridColumnWidth";
 import { DATA_GRID_ROW_NUM_WIDTH, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
@@ -8,8 +8,6 @@ function createResizeState(options: { columns: string[]; rows: Array<Array<strin
     columns: computed(() => options.columns),
     sourceRows: computed(() => options.rows),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
-    gridRef: ref<HTMLDivElement>(),
-    scrollbarGutter: ref(0),
   });
 }
 

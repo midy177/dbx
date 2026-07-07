@@ -2650,8 +2650,6 @@ const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, to
   columns: visibleColumns,
   sourceRows: computed(() => props.result.rows),
   columnIndexes: visibleColumnIndexes,
-  gridRef,
-  scrollbarGutter: gridScrollbarGutter,
 });
 const gridStyle = computed(() => ({
   ...columnVars.value,

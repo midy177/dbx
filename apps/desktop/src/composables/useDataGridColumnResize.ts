@@ -1,4 +1,4 @@
-import { ref, computed, watch, type ComputedRef, type Ref } from "vue";
+import { ref, computed, watch, type ComputedRef } from "vue";
 import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, DATA_GRID_SAMPLE_ROWS } from "@/lib/dataGrid/dataGridColumnWidth";
 
 type CellValue = string | number | boolean | null;
@@ -13,8 +13,6 @@ export interface UseDataGridColumnResizeOptions {
   columns: ComputedRef<string[]>;
   sourceRows: ComputedRef<CellValue[][]>;
   columnIndexes: ComputedRef<number[]>;
-  gridRef: Ref<HTMLDivElement | undefined>;
-  scrollbarGutter?: Ref<number>;
 }
 
 export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions) {
