@@ -653,6 +653,10 @@ fn mysql_setup_queries_for_database(
         queries.push(format!("SET time_zone = {}", quote_value(&time_zone)));
     }
     queries.push(format!("SET NAMES {charset}"));
+    // MySQL defaults group_concat_max_len to 1024, which silently truncates
+    // GROUP_CONCAT results. Use @@ syntax because Manticore accepts it as a
+    // compatibility no-op while `SET SESSION` fails during connection setup.
+    queries.push("SET @@group_concat_max_len = 1048576".to_string());
     // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
     // catalog. `SET catalog` must run *before* `USE <database>` (the database
     // lives in the external catalog and is unknown to the default one).
@@ -3836,21 +3840,21 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_select_requested_database_before_session_init() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4"]);
+        assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
     }
 
     #[test]
     fn mysql_setup_queries_skip_use_when_database_missing() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["SET NAMES utf8mb4"]);
+        assert_eq!(queries, vec!["SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
     }
 
     #[test]
     fn mysql_setup_queries_decode_database_name_from_url() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4"]);
+        assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
     }
 
     #[test]
@@ -3861,7 +3865,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
             &[],
         );
 
-        assert_eq!(queries, vec!["USE `app``proxy`", "SET NAMES utf8mb4"]);
+        assert_eq!(queries, vec!["USE `app``proxy`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
     }
 
     #[test]
@@ -4043,18 +4047,21 @@ UNIQUE KEY(`tenant_id`, `name``part`)
 
     #[test]
     fn mysql_setup_queries_default_to_utf8mb4() {
-        assert_eq!(mysql_setup_queries("mysql://host:3306/db", &[]), vec!["USE `db`", "SET NAMES utf8mb4"]);
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db", &[]),
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+        );
     }
 
     #[test]
     fn mysql_setup_queries_use_safe_custom_charset() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?ssl-mode=preferred&charset=gbk", &[]),
-            vec!["USE `db`", "SET NAMES gbk"]
+            vec!["USE `db`", "SET NAMES gbk", "SET @@group_concat_max_len = 1048576"]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 
@@ -4064,7 +4071,12 @@ UNIQUE KEY(`tenant_id`, `name``part`)
 
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db", &extra),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET ob_query_timeout = 30000000"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET @@group_concat_max_len = 1048576",
+                "SET ob_query_timeout = 30000000"
+            ]
         );
     }
 
@@ -4072,11 +4084,16 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_apply_explicit_time_zone() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&charset=utf8mb4", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time-zone=Asia%2FShanghai", &[]),
-            vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
+            vec![
+                "USE `db`",
+                "SET time_zone = 'Asia/Shanghai'",
+                "SET NAMES utf8mb4",
+                "SET @@group_concat_max_len = 1048576"
+            ]
         );
     }
 
@@ -4084,11 +4101,11 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_apply_jdbc_time_zone_aliases() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC", &[]),
-            vec!["USE `db`", "SET time_zone = '+00:00'", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET time_zone = '+00:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 
@@ -4096,11 +4113,16 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_apply_go_loc_when_no_explicit_time_zone_exists() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?loc=Asia%2FShanghai", &[]),
-            vec!["USE `db`", "SET time_zone = 'Asia/Shanghai'", "SET NAMES utf8mb4"]
+            vec![
+                "USE `db`",
+                "SET time_zone = 'Asia/Shanghai'",
+                "SET NAMES utf8mb4",
+                "SET @@group_concat_max_len = 1048576"
+            ]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&loc=UTC", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 
@@ -4108,7 +4130,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_ignore_unsafe_time_zone_values() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 
@@ -4118,7 +4140,12 @@ UNIQUE KEY(`tenant_id`, `name``part`)
         // execution (Vec::pop) runs it before `USE <database>`.
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/clip?catalog=paimon_catalog", &[]),
-            vec!["USE `clip`", "SET NAMES utf8mb4", "SET catalog = `paimon_catalog`"]
+            vec![
+                "USE `clip`",
+                "SET NAMES utf8mb4",
+                "SET @@group_concat_max_len = 1048576",
+                "SET catalog = `paimon_catalog`"
+            ]
         );
     }
 
@@ -4126,7 +4153,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_switch_catalog_without_database() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/?catalog=paimon_catalog", &[]),
-            vec!["SET NAMES utf8mb4", "SET catalog = `paimon_catalog`"]
+            vec!["SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576", "SET catalog = `paimon_catalog`"]
         );
     }
 
@@ -4134,7 +4161,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_decodes_catalog_parameter() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?catalog=my%5Fcatalog", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET catalog = `my_catalog`"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576", "SET catalog = `my_catalog`"]
         );
     }
 
@@ -4142,7 +4169,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_omits_catalog_when_absent() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
         );
     }
 }
