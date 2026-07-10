@@ -1,9 +1,16 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fs;
+
+use crate::path_utils::expand_tilde;
 use std::sync::Arc;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use russh::client::{self, Config, Handle};
-use russh::keys::{key::PrivateKeyWithHashAlg, load_secret_key};
-use russh::ChannelMsg;
+use russh::keys::agent::{client::AgentClient, AgentIdentity};
+use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
+use russh::{kex, mac, ChannelMsg, Preferred};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -38,6 +45,29 @@ impl client::Handler for SshClient {
     }
 }
 
+fn ssh_client_config() -> Config {
+    let mut preferred = Preferred::default();
+    let mut kex = preferred.kex.into_owned();
+    for algorithm in [kex::ECDH_SHA2_NISTP256, kex::ECDH_SHA2_NISTP384, kex::ECDH_SHA2_NISTP521, kex::DH_G14_SHA1] {
+        if !kex.contains(&algorithm) {
+            kex.push(algorithm);
+        }
+    }
+    preferred.kex = Cow::Owned(kex);
+
+    let mut mac = preferred.mac.into_owned();
+    // Keep SHA-1 MAC variants as last-resort fallbacks for legacy SSH proxies.
+    for algorithm in [mac::HMAC_SHA1_ETM, mac::HMAC_SHA1] {
+        if !mac.contains(&algorithm) {
+            mac.push(algorithm);
+        }
+    }
+    preferred.mac = Cow::Owned(mac);
+
+    Config { nodelay: true, keepalive_interval: Some(Duration::from_secs(30)), preferred, ..Default::default() }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_authenticate(
     ssh_host: &str,
     ssh_port: u16,
@@ -45,10 +75,12 @@ async fn connect_and_authenticate(
     ssh_password: &str,
     ssh_key_path: &str,
     ssh_key_passphrase: &str,
+    use_ssh_agent: bool,
+    ssh_agent_sock_path: &str,
+    auth_method: &str,
     connect_timeout_secs: u64,
 ) -> Result<Handle<SshClient>, String> {
-    let config =
-        Arc::new(Config { nodelay: true, keepalive_interval: Some(Duration::from_secs(30)), ..Default::default() });
+    let config = Arc::new(ssh_client_config());
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
 
     let mut session =
@@ -57,12 +89,36 @@ async fn connect_and_authenticate(
             .map_err(|_| format!("SSH connection timed out ({connect_timeout_secs}s)"))?
             .map_err(|e| format!("SSH connection failed: {e}"))?;
 
-    if !ssh_key_path.is_empty() {
+    // Probe with "none" authentication first. Some SSH proxies and jump-hosts
+    // accept connections without any credential, and this is also the standard
+    // SSH probe used to discover the auth methods the server supports.
+    let none_res = tokio::time::timeout(connect_timeout, session.authenticate_none(ssh_user))
+        .await
+        .map_err(|_| format!("SSH auth probe timed out ({connect_timeout_secs}s)"))?
+        .map_err(|e| format!("SSH auth probe failed: {e}"))?;
+    if none_res.success() {
+        return Ok(session);
+    }
+
+    // When auth_method is "none" and the probe was rejected, fail early
+    // instead of falling back to other credential methods.
+    if auth_method == "none" {
+        return Err("SSH authentication failed: server rejected the connection without credentials".to_string());
+    }
+
+    // "none" was rejected — fall back to the configured credential method.
+    // When auth_method is set, only try the matching method.
+    let try_key = auth_method.is_empty() && !ssh_key_path.is_empty() || auth_method == "key";
+    let try_password = auth_method.is_empty() && !ssh_password.is_empty() || auth_method == "password";
+    let try_agent = auth_method.is_empty() && use_ssh_agent || auth_method == "agent";
+
+    if try_key {
         // Validate SSH key file path
         validate_file_path(ssh_key_path, |_| false)?;
 
         let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase) };
-        let key_pair = load_secret_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
+        let key_pair =
+            load_ssh_private_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
         let auth_res = tokio::time::timeout(
             connect_timeout,
             session.authenticate_publickey(
@@ -79,7 +135,7 @@ async fn connect_and_authenticate(
         if !auth_res.success() {
             return Err("SSH public key authentication failed".to_string());
         }
-    } else if !ssh_password.is_empty() {
+    } else if try_password {
         let auth_res = tokio::time::timeout(connect_timeout, session.authenticate_password(ssh_user, ssh_password))
             .await
             .map_err(|_| format!("SSH password auth timed out ({connect_timeout_secs}s)"))?
@@ -87,11 +143,234 @@ async fn connect_and_authenticate(
         if !auth_res.success() {
             return Err("SSH password authentication failed".to_string());
         }
+    } else if try_agent {
+        match try_authenticate_with_agent(&mut session, ssh_user, ssh_agent_sock_path, &connect_timeout).await {
+            Ok(()) => {}
+            Err(agent_err) => return Err(agent_err),
+        }
     } else {
-        return Err("No SSH password or key provided".to_string());
+        return Err(
+            "SSH authentication failed: \"none\" was rejected and no password, key, or ssh-agent is configured"
+                .to_string(),
+        );
     }
 
     Ok(session)
+}
+
+/// Try to authenticate using ssh-agent identities. Returns `Ok(())` on success,
+/// or an error describing why agent auth failed (unavailable, no identities, all rejected).
+async fn try_authenticate_with_agent(
+    session: &mut Handle<SshClient>,
+    ssh_user: &str,
+    ssh_agent_sock_path: &str,
+    connect_timeout: &Duration,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    let mut agent = if ssh_agent_sock_path.is_empty() {
+        match AgentClient::connect_env().await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(format!("No SSH password or key provided, and ssh-agent is unavailable: {e}"));
+            }
+        }
+    } else {
+        match AgentClient::connect_uds(ssh_agent_sock_path).await {
+            Ok(a) => a,
+            Err(e) => {
+                return Err(format!(
+                    "No SSH password or key provided, and ssh-agent at '{}' is unavailable: {e}",
+                    ssh_agent_sock_path
+                ));
+            }
+        }
+    };
+
+    #[cfg(windows)]
+    let mut agent = {
+        let stream = pageant::PageantStream::new()
+            .await
+            .map_err(|e| format!("No SSH password or key provided, and ssh-agent (Pageant) is unavailable: {e}"))?;
+        AgentClient::connect(stream)
+    };
+
+    let identities = match agent.request_identities().await {
+        Ok(ids) if ids.is_empty() => {
+            return Err("No SSH password or key provided, and ssh-agent has no identities".to_string());
+        }
+        Ok(ids) => ids,
+        Err(e) => {
+            return Err(format!("No SSH password or key provided, and ssh-agent request failed: {e}"));
+        }
+    };
+
+    let hash_alg = session.best_supported_rsa_hash().await.ok().flatten().flatten();
+
+    let auth_result = tokio::time::timeout(*connect_timeout, async {
+        for identity in identities {
+            let result = match &identity {
+                AgentIdentity::PublicKey { key, .. } => {
+                    session.authenticate_publickey_with(ssh_user, key.clone(), hash_alg, &mut agent).await
+                }
+                AgentIdentity::Certificate { certificate, .. } => {
+                    session.authenticate_certificate_with(ssh_user, certificate.clone(), hash_alg, &mut agent).await
+                }
+            };
+
+            match result {
+                Ok(auth_res) if auth_res.success() => return Ok(()),
+                Ok(_) => continue,
+                Err(e) => {
+                    log::debug!("SSH agent identity ({}) auth failed: {e}", identity.comment());
+                    continue;
+                }
+            }
+        }
+        Err("No SSH password or key provided, and no ssh-agent identity was accepted".to_string())
+    })
+    .await;
+
+    match auth_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("No SSH password or key provided, and ssh-agent auth timed out".to_string()),
+    }
+}
+
+fn load_ssh_private_key(path: &str, passphrase: Option<&str>) -> Result<PrivateKey, String> {
+    let expanded = expand_tilde(path);
+    let secret = fs::read_to_string(&expanded).map_err(|e| e.to_string())?;
+    match decode_secret_key(&secret, passphrase) {
+        Ok(key) => Ok(key),
+        Err(err) if is_ssh_key_character_encoding_error(&err.to_string()) => {
+            let sanitized = sanitize_unencrypted_openssh_comment(&secret)?;
+            decode_secret_key(&sanitized, passphrase).map_err(|retry_err| retry_err.to_string())
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn is_ssh_key_character_encoding_error(error: &str) -> bool {
+    error.contains("SshKey: character encoding invalid")
+}
+
+fn sanitize_unencrypted_openssh_comment(secret: &str) -> Result<String, String> {
+    const BEGIN: &str = "-----BEGIN OPENSSH PRIVATE KEY-----";
+    const END: &str = "-----END OPENSSH PRIVATE KEY-----";
+
+    if !secret.lines().any(|line| line == BEGIN) {
+        return Err("SSH key comment encoding is invalid and the key is not an OpenSSH private key".to_string());
+    }
+
+    let body = secret.lines().filter(|line| !line.starts_with("-----")).collect::<String>();
+    let mut bytes =
+        BASE64_STANDARD.decode(body.as_bytes()).map_err(|e| format!("OpenSSH key base64 decode failed: {e}"))?;
+
+    sanitize_unencrypted_openssh_comment_bytes(&mut bytes)?;
+
+    Ok(format!("{BEGIN}\n{}\n{END}\n", BASE64_STANDARD.encode(bytes)))
+}
+
+fn sanitize_unencrypted_openssh_comment_bytes(bytes: &mut Vec<u8>) -> Result<(), String> {
+    const AUTH_MAGIC: &[u8] = b"openssh-key-v1\0";
+
+    if !bytes.starts_with(AUTH_MAGIC) {
+        return Err("OpenSSH key header is invalid".to_string());
+    }
+
+    let mut pos = AUTH_MAGIC.len();
+    let ciphername = read_ssh_string(bytes, &mut pos)?;
+    if ciphername != b"none" {
+        return Err("SSH key comment encoding is invalid and encrypted OpenSSH keys cannot be sanitized".to_string());
+    }
+
+    let _kdfname = read_ssh_string(bytes, &mut pos)?;
+    let _kdfoptions = read_ssh_string(bytes, &mut pos)?;
+    let key_count = read_u32(bytes, &mut pos)?;
+    if key_count != 1 {
+        return Err("OpenSSH keys with multiple private keys are unsupported".to_string());
+    }
+
+    let _public_key = read_ssh_string(bytes, &mut pos)?;
+    let private_blob_len_pos = pos;
+    let private_blob = read_ssh_string(bytes, &mut pos)?;
+    let patched_private_blob = sanitize_private_blob_comment(private_blob)?;
+    let patched_private_blob_len = (patched_private_blob.len() as u32).to_be_bytes();
+
+    bytes.splice(private_blob_len_pos..pos, patched_private_blob_len.into_iter().chain(patched_private_blob));
+
+    Ok(())
+}
+
+fn sanitize_private_blob_comment(blob: &[u8]) -> Result<Vec<u8>, String> {
+    let unpadded_end = blob
+        .len()
+        .checked_sub(openssh_padding_len(blob)?)
+        .ok_or_else(|| "OpenSSH private key padding is invalid".to_string())?;
+    let comment_len_pos = find_trailing_ssh_string_len_pos(&blob[..unpadded_end])
+        .ok_or_else(|| "OpenSSH private key comment field was not found".to_string())?;
+
+    let mut patched = Vec::with_capacity(blob.len());
+    patched.extend_from_slice(&blob[..comment_len_pos]);
+    patched.extend_from_slice(&0u32.to_be_bytes());
+
+    let padding_len = padding_len_for_block(patched.len(), 8);
+    for value in 1..=padding_len {
+        patched.push(value as u8);
+    }
+
+    Ok(patched)
+}
+
+fn openssh_padding_len(bytes: &[u8]) -> Result<usize, String> {
+    for len in (1..=16).rev() {
+        if bytes.len() >= len
+            && bytes[bytes.len() - len..].iter().enumerate().all(|(index, byte)| *byte == (index + 1) as u8)
+        {
+            return Ok(len);
+        }
+    }
+
+    Err("OpenSSH private key padding is invalid".to_string())
+}
+
+fn find_trailing_ssh_string_len_pos(bytes: &[u8]) -> Option<usize> {
+    (8..bytes.len().saturating_sub(3)).rev().find(|pos| {
+        let Some(len_bytes) = bytes.get(*pos..*pos + 4) else {
+            return false;
+        };
+        let len = u32::from_be_bytes(len_bytes.try_into().expect("slice length checked")) as usize;
+        pos.checked_add(4).and_then(|value| value.checked_add(len)) == Some(bytes.len())
+    })
+}
+
+fn padding_len_for_block(len: usize, block_size: usize) -> usize {
+    let remainder = len % block_size;
+    if remainder == 0 {
+        block_size
+    } else {
+        block_size - remainder
+    }
+}
+
+fn read_ssh_string<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<&'a [u8], String> {
+    let len = read_u32(bytes, pos)? as usize;
+    let end = pos.checked_add(len).ok_or_else(|| "OpenSSH key field length is invalid".to_string())?;
+    if end > bytes.len() {
+        return Err("OpenSSH key field is truncated".to_string());
+    }
+
+    let value = &bytes[*pos..end];
+    *pos = end;
+    Ok(value)
+}
+
+fn read_u32(bytes: &[u8], pos: &mut usize) -> Result<u32, String> {
+    let end = pos.checked_add(4).ok_or_else(|| "OpenSSH key field length is invalid".to_string())?;
+    let value = bytes.get(*pos..end).ok_or_else(|| "OpenSSH key field is truncated".to_string())?;
+    *pos = end;
+
+    Ok(u32::from_be_bytes(value.try_into().map_err(|_| "OpenSSH key field length is invalid".to_string())?))
 }
 
 /// Accept connections on the local listener and forward them through the SSH session.
@@ -203,6 +482,9 @@ async fn tunnel_reconnect_loop(
     ssh_password: String,
     ssh_key_path: String,
     ssh_key_passphrase: String,
+    use_ssh_agent: bool,
+    ssh_agent_sock_path: String,
+    auth_method: String,
     connect_timeout_secs: u64,
     listener: TcpListener,
     remote_host: String,
@@ -236,6 +518,9 @@ async fn tunnel_reconnect_loop(
                 &ssh_password,
                 &ssh_key_path,
                 &ssh_key_passphrase,
+                use_ssh_agent,
+                &ssh_agent_sock_path,
+                &auth_method,
                 connect_timeout_secs,
             )
             .await
@@ -304,14 +589,23 @@ impl TunnelManager {
         ssh_password: &str,
         ssh_key_path: &str,
         ssh_key_passphrase: &str,
+        use_ssh_agent: bool,
+        ssh_agent_sock_path: &str,
+        auth_method: &str,
         connect_timeout_secs: u64,
         remote_host: &str,
         remote_port: u16,
         expose_to_lan: bool,
     ) -> Result<u16, String> {
-        if let Some(local_port) = self.local_port(connection_id).await {
-            return Ok(local_port);
+        // Check cache under lock to avoid race with concurrent callers.
+        // Also evict stale entries whose background task has exited.
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
         }
+        // Slow SSH connection — do this outside the lock.
         let (handle, local_port) = spawn_tunnel(
             ssh_host,
             ssh_port,
@@ -319,6 +613,9 @@ impl TunnelManager {
             ssh_password,
             ssh_key_path,
             ssh_key_passphrase,
+            use_ssh_agent,
+            ssh_agent_sock_path,
+            auth_method,
             connect_timeout_secs,
             remote_host,
             remote_port,
@@ -326,9 +623,26 @@ impl TunnelManager {
         )
         .await?;
 
-        self.tunnels.lock().await.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
-
+        // Re-check under lock: another caller may have beaten us.
+        let mut tunnels = self.tunnels.lock().await;
+        if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+            // Another task already created a live tunnel; abort ours.
+            handle.abort();
+            return Ok(port);
+        }
+        tunnels.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
         Ok(local_port)
+    }
+
+    /// Returns the local port for a cached tunnel entry, or `None` if the entry
+    /// is stale (all background handles have exited).
+    fn get_active_port(tunnels: &mut HashMap<String, TunnelEntry>, connection_id: &str) -> Option<u16> {
+        let entry = tunnels.get(connection_id)?;
+        if entry.handles.iter().all(|h| h.is_finished()) {
+            tunnels.remove(connection_id);
+            return None;
+        }
+        Some(entry.local_port)
     }
 
     pub async fn start_chain(
@@ -341,8 +655,12 @@ impl TunnelManager {
         if hops.is_empty() {
             return Err("No SSH tunnel hops configured".to_string());
         }
-        if let Some(local_port) = self.local_port(connection_id).await {
-            return Ok(local_port);
+        // Check cache under lock; evict stale entries.
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
         }
 
         let mut handles = Vec::new();
@@ -366,6 +684,9 @@ impl TunnelManager {
                 &hop.password,
                 &hop.key_path,
                 &hop.key_passphrase,
+                hop.use_ssh_agent,
+                &hop.ssh_agent_sock_path,
+                &hop.auth_method,
                 effective_hop_timeout(hop),
                 &target_host,
                 target_port,
@@ -379,11 +700,15 @@ impl TunnelManager {
             next_connect_endpoint = Some(("127.0.0.1".to_string(), local_port));
         }
 
-        self.tunnels
-            .lock()
-            .await
-            .insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
-
+        // Re-check under lock: another caller may have beaten us.
+        let mut tunnels = self.tunnels.lock().await;
+        if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+            for handle in handles {
+                handle.abort();
+            }
+            return Ok(port);
+        }
+        tunnels.insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
         Ok(final_local_port)
     }
 
@@ -398,6 +723,18 @@ impl TunnelManager {
             }
         }
     }
+
+    pub async fn stop_tunnels_with_prefix(&self, connection_id_prefix: &str) {
+        let mut tunnels = self.tunnels.lock().await;
+        let keys: Vec<String> = tunnels.keys().filter(|key| key.starts_with(connection_id_prefix)).cloned().collect();
+        for key in keys {
+            if let Some(entry) = tunnels.remove(&key) {
+                for handle in entry.handles {
+                    handle.abort();
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -408,6 +745,9 @@ async fn spawn_tunnel(
     ssh_password: &str,
     ssh_key_path: &str,
     ssh_key_passphrase: &str,
+    use_ssh_agent: bool,
+    ssh_agent_sock_path: &str,
+    auth_method: &str,
     connect_timeout_secs: u64,
     remote_host: &str,
     remote_port: u16,
@@ -427,6 +767,9 @@ async fn spawn_tunnel(
         ssh_password,
         ssh_key_path,
         ssh_key_passphrase,
+        use_ssh_agent,
+        ssh_agent_sock_path,
+        auth_method,
         connect_timeout_secs,
     )
     .await?;
@@ -439,6 +782,9 @@ async fn spawn_tunnel(
         ssh_password.to_string(),
         ssh_key_path.to_string(),
         ssh_key_passphrase.to_string(),
+        use_ssh_agent,
+        ssh_agent_sock_path.to_string(),
+        auth_method.to_string(),
         connect_timeout_secs,
         listener,
         remote_host.to_string(),
@@ -484,8 +830,43 @@ fn plan_chain(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_hop_timeout, plan_chain, PlannedTunnel, TunnelManager};
+    use super::{
+        effective_hop_timeout, openssh_padding_len, plan_chain, read_ssh_string,
+        sanitize_unencrypted_openssh_comment_bytes, ssh_client_config, PlannedTunnel, TunnelManager,
+    };
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
+
+    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn push_ssh_string(bytes: &mut Vec<u8>, value: &[u8]) {
+        push_u32(bytes, value.len() as u32);
+        bytes.extend_from_slice(value);
+    }
+
+    fn padded_private_blob(comment: &[u8]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        push_u32(&mut blob, 7);
+        push_u32(&mut blob, 7);
+        blob.extend_from_slice(b"fake-private-key");
+        push_ssh_string(&mut blob, comment);
+        for value in 1..=(8 - (blob.len() % 8)) {
+            blob.push(value as u8);
+        }
+        blob
+    }
+
+    fn openssh_container(private_blob: &[u8]) -> Vec<u8> {
+        let mut bytes = b"openssh-key-v1\0".to_vec();
+        push_ssh_string(&mut bytes, b"none");
+        push_ssh_string(&mut bytes, b"none");
+        push_ssh_string(&mut bytes, b"");
+        push_u32(&mut bytes, 1);
+        push_ssh_string(&mut bytes, b"fake-public-key");
+        push_ssh_string(&mut bytes, private_blob);
+        bytes
+    }
 
     fn hop(id: &str, host: &str, port: u16) -> SshTunnelConfig {
         SshTunnelConfig {
@@ -500,6 +881,9 @@ mod tests {
             key_passphrase: String::new(),
             connect_timeout_secs: 5,
             expose_lan: false,
+            use_ssh_agent: false,
+            ssh_agent_sock_path: String::new(),
+            auth_method: "password".to_string(),
         }
     }
 
@@ -534,6 +918,49 @@ mod tests {
         tunnel.connect_timeout_secs = 0;
 
         assert_eq!(effective_hop_timeout(&tunnel), default_ssh_connect_timeout_secs());
+    }
+
+    #[test]
+    fn ssh_client_config_keeps_legacy_kex_after_safe_defaults() {
+        let config = ssh_client_config();
+        let kex = config.preferred.kex;
+        let curve25519_index = kex.iter().position(|algorithm| *algorithm == russh::kex::CURVE25519).unwrap();
+        let ecdh_index = kex.iter().position(|algorithm| *algorithm == russh::kex::ECDH_SHA2_NISTP256).unwrap();
+        let group14_sha1_index = kex.iter().position(|algorithm| *algorithm == russh::kex::DH_G14_SHA1).unwrap();
+
+        assert!(curve25519_index < ecdh_index);
+        assert!(ecdh_index < group14_sha1_index);
+    }
+
+    #[test]
+    fn ssh_client_config_keeps_legacy_mac_after_safe_defaults() {
+        let config = ssh_client_config();
+        let mac = config.preferred.mac;
+        let sha2_etm_index = mac.iter().position(|algorithm| *algorithm == russh::mac::HMAC_SHA256_ETM).unwrap();
+        let sha1_etm_index = mac.iter().position(|algorithm| *algorithm == russh::mac::HMAC_SHA1_ETM).unwrap();
+        let sha1_index = mac.iter().position(|algorithm| *algorithm == russh::mac::HMAC_SHA1).unwrap();
+
+        assert!(sha2_etm_index < sha1_etm_index);
+        assert!(sha1_etm_index < sha1_index);
+    }
+
+    #[test]
+    fn sanitizes_invalid_openssh_private_key_comment() {
+        let mut key = openssh_container(&padded_private_blob(&[0xff, 0xfe, b'a']));
+
+        sanitize_unencrypted_openssh_comment_bytes(&mut key).unwrap();
+
+        let mut pos = b"openssh-key-v1\0".len();
+        assert_eq!(read_ssh_string(&key, &mut pos).unwrap(), b"none");
+        let _kdfname = read_ssh_string(&key, &mut pos).unwrap();
+        let _kdfoptions = read_ssh_string(&key, &mut pos).unwrap();
+        pos += 4;
+        let _public_key = read_ssh_string(&key, &mut pos).unwrap();
+        let private_blob = read_ssh_string(&key, &mut pos).unwrap();
+        let unpadded_end = private_blob.len() - openssh_padding_len(private_blob).unwrap();
+        let comment_len_pos = unpadded_end - 4;
+
+        assert_eq!(&private_blob[comment_len_pos..unpadded_end], &0u32.to_be_bytes());
     }
 
     #[tokio::test]

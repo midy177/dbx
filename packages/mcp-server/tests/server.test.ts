@@ -25,11 +25,25 @@ const backend: Backend = {
   addConnection: async () => connection,
   removeConnection: async () => true,
   listTables: async () => [{ name: "users", type: "BASE TABLE" }],
-  describeTable: async () => [
-    { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, comment: null },
-  ],
+  describeTable: async () => [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, comment: null }],
   executeQuery: async () => ({ columns: ["total"], rows: [{ total: 1 }], row_count: 1 }),
 };
+
+async function withScopedEnv<T>(env: Record<string, string>, fn: () => T | Promise<T>): Promise<T> {
+  const oldValues = new Map<string, string | undefined>();
+  for (const key of Object.keys(env)) {
+    oldValues.set(key, process.env[key]);
+    process.env[key] = env[key];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of oldValues) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 test("creates an MCP server without starting stdio transport", () => {
   const server = createDbxMcpServer(backend, { isWebMode: true });
@@ -109,6 +123,179 @@ test("execute query reports the blocked statement number for unsafe multi-statem
   assert.match(result.content[0].text, /WHERE/);
 });
 
+test("scoped MCP lists only the active connection", async () => {
+  const other: ConnectionConfig = { ...connection, id: "2", name: "other", database: "other_db" };
+  const scopedBackend: Backend = {
+    ...backend,
+    loadConnections: async () => [connection, other],
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_list_connections.handler({});
+  });
+
+  assert.match(result.content[0].text, /local/);
+  assert.doesNotMatch(result.content[0].text, /other/);
+});
+
+test("scoped MCP rejects out-of-scope connection tool calls", async () => {
+  const result = await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1" }, () => {
+    const server = createDbxMcpServer(backend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_list_tables.handler({ connection_name: "other" });
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /CONNECTION_OUT_OF_SCOPE:/);
+});
+
+test("scoped MCP defaults connection-taking tools to the active connection and database", async () => {
+  let usedDatabase = "";
+  const scopedBackend: Backend = {
+    ...backend,
+    listTables: async (config) => {
+      usedDatabase = config.database || "";
+      return [{ name: "users", type: "BASE TABLE" }];
+    },
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1", DBX_MCP_SCOPE_DATABASE: "scoped_db" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_list_tables.handler({});
+  });
+
+  assert.match(result.content[0].text, /users/);
+  assert.equal(usedDatabase, "scoped_db");
+});
+
+test("scoped MCP does not register mutation or desktop bridge tools", async () => {
+  await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1" }, () => {
+    const server = createDbxMcpServer(backend, { isWebMode: false });
+    const tools = (server as any)._registeredTools;
+
+    assert.equal(tools.dbx_add_connection, undefined);
+    assert.equal(tools.dbx_remove_connection, undefined);
+    assert.equal(tools.dbx_open_table, undefined);
+    assert.equal(tools.dbx_execute_and_show, undefined);
+  });
+});
+
+test("scoped MCP with writes disabled blocks write SQL", async () => {
+  const result = await withScopedEnv({ DBX_MCP_SCOPE_CONNECTION_ID: "1", DBX_MCP_ALLOW_WRITES: "0" }, () => {
+    const server = createDbxMcpServer(backend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_query.handler({
+      sql: "update users set name = 'x' where id = 1",
+    });
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /SQL_BLOCKED:/);
+});
+
+test("redis execute query points callers to the redis command tool", async () => {
+  const redisConnection: ConnectionConfig = { ...connection, db_type: "redis", database: "0" };
+  const scopedBackend: Backend = {
+    ...backend,
+    findConnection: async () => redisConnection,
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  const result = await (server as any)._registeredTools.dbx_execute_query.handler({
+    connection_name: "local",
+    sql: "GET session:1",
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /REDIS_COMMAND_REQUIRED:/);
+  assert.match(result.content[0].text, /dbx_execute_redis_command/);
+});
+
+test("redis command tool executes redis commands on the selected database", async () => {
+  const redisConnection: ConnectionConfig = { ...connection, db_type: "redis", database: "2" };
+  let usedDb = -1;
+  let usedCommand = "";
+  const scopedBackend: Backend = {
+    ...backend,
+    findConnection: async () => redisConnection,
+    executeRedisCommand: async (_config, db, command) => {
+      usedDb = db;
+      usedCommand = command;
+      return { command: "GET", safety: "allowed", value: "value-1" };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  const result = await (server as any)._registeredTools.dbx_execute_redis_command.handler({
+    connection_name: "local",
+    command: "GET session:1",
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(usedDb, 2);
+  assert.equal(usedCommand, "GET session:1");
+  assert.match(result.content[0].text, /Command: GET/);
+  assert.match(result.content[0].text, /value-1/);
+});
+
+test("redis command tool blocks write commands in read-only MCP sessions", async () => {
+  let executed = false;
+  const redisConnection: ConnectionConfig = { ...connection, db_type: "redis" };
+  const scopedBackend: Backend = {
+    ...backend,
+    findConnection: async () => redisConnection,
+    executeRedisCommand: async () => {
+      executed = true;
+      return { command: "SET", safety: "write", value: "OK" };
+    },
+  };
+
+  const result = await withScopedEnv({ DBX_MCP_ALLOW_WRITES: "0" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_redis_command.handler({
+      connection_name: "local",
+      command: "SET session:1 value",
+    });
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /REDIS_COMMAND_BLOCKED:/);
+});
+
+test("redis command tool allows dangerous redis commands only when explicitly enabled", async () => {
+  const redisConnection: ConnectionConfig = { ...connection, db_type: "redis" };
+  let skipSafetyCheck = false;
+  const scopedBackend: Backend = {
+    ...backend,
+    findConnection: async () => redisConnection,
+    executeRedisCommand: async (_config, _db, _command, options) => {
+      skipSafetyCheck = options?.skipSafetyCheck ?? false;
+      return { command: "KEYS", safety: "blocked", value: ["session:1"] };
+    },
+  };
+
+  const blocked = await withScopedEnv({ DBX_MCP_ALLOW_DANGEROUS_SQL: "0" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_redis_command.handler({
+      connection_name: "local",
+      command: "KEYS *",
+    });
+  });
+  const allowed = await withScopedEnv({ DBX_MCP_ALLOW_DANGEROUS_SQL: "1" }, () => {
+    const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+    return (server as any)._registeredTools.dbx_execute_redis_command.handler({
+      connection_name: "local",
+      command: "KEYS *",
+    });
+  });
+
+  assert.equal(blocked.isError, true);
+  assert.match(blocked.content[0].text, /REDIS_COMMAND_BLOCKED:/);
+  assert.equal(allowed.isError, undefined);
+  assert.equal(skipSafetyCheck, true);
+  assert.match(allowed.content[0].text, /session:1/);
+});
+
 test("mongodb list tables returns collections from the selected database", async () => {
   let usedDatabase = "";
   const mongoConnection: ConnectionConfig = { ...connection, db_type: "mongodb", database: "admin" };
@@ -138,8 +325,22 @@ test("mongodb describe table returns inferred document fields", async () => {
     ...backend,
     findConnection: async () => mongoConnection,
     describeTable: async () => [
-      { name: "_id", data_type: "object", is_nullable: false, column_default: null, is_primary_key: true, comment: null },
-      { name: "name", data_type: "string", is_nullable: false, column_default: null, is_primary_key: false, comment: null },
+      {
+        name: "_id",
+        data_type: "object",
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: true,
+        comment: null,
+      },
+      {
+        name: "name",
+        data_type: "string",
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: false,
+        comment: null,
+      },
     ],
   };
   const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
@@ -159,7 +360,11 @@ test("mongodb execute query formats shell-style find results", async () => {
   const scopedBackend: Backend = {
     ...backend,
     findConnection: async () => mongoConnection,
-    executeQuery: async () => ({ columns: ["_id", "meta", "missing"], rows: [{ _id: "1", meta: { name: "demo" }, missing: null }], row_count: 1 }),
+    executeQuery: async () => ({
+      columns: ["_id", "meta", "missing"],
+      rows: [{ _id: "1", meta: { name: "demo" }, missing: null }],
+      row_count: 1,
+    }),
   };
   const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
 
@@ -184,6 +389,32 @@ test("connection lookup failures include a stable MCP error code", async () => {
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /CONNECTION_NOT_FOUND:/);
   assert.match(result.content[0].text, /missing/);
+});
+
+test("add connection accepts H2 file paths without a port", async () => {
+  let added: Omit<ConnectionConfig, "id"> | undefined;
+  const scopedBackend: Backend = {
+    ...backend,
+    findConnection: async () => undefined,
+    addConnection: async (config) => {
+      added = config;
+      return { id: "h2-file", ...config };
+    },
+  };
+  const server = createDbxMcpServer(scopedBackend, { isWebMode: true });
+
+  const result = await (server as any)._registeredTools.dbx_add_connection.handler({
+    name: "h2-local",
+    db_type: "h2",
+    host: "/data/app.mv.db",
+    username: "sa",
+    password: "",
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(added?.db_type, "h2");
+  assert.equal(added?.host, "/data/app.mv.db");
+  assert.equal(added?.port, 0);
 });
 
 test("SQL safety failures include a stable MCP error code", async () => {

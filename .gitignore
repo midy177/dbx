@@ -4,9 +4,11 @@ node_modules/
 .codex/
 .superpowers/
 .trellis/
+.worktrees/
 openspec/
 .mcp.json
 AGENTS.md
+CLAUDE.md
 
 # Build output
 dist/
@@ -50,12 +52,15 @@ tmp/
 # Logs
 *.log
 
-# Agent JDBC driver JARs
-agents/*/libs/*.jar
 
 # Generated changelog data
 releases-*.json
+latest-en.json
 
 test.pdb
 portable/
 DBX_*_x64-portable.zip
+.agents/skills
+.pnpm-store/*
+.dbx-web
+_dev

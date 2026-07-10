@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
-use crate::types::{ColumnInfo, ForeignKeyInfo, IndexInfo, TableInfo, TriggerInfo};
+use crate::types::{
+    ColumnInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, OwnerInfo, RuleInfo, SequenceInfo, TableInfo, TriggerInfo,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +65,62 @@ pub struct TriggerDiff {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FunctionDiff {
+    #[serde(rename = "type")]
+    pub diff_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<FunctionInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<FunctionInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceDiff {
+    #[serde(rename = "type")]
+    pub diff_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SequenceInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<SequenceInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleDiff {
+    #[serde(rename = "type")]
+    pub diff_type: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<RuleInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<RuleInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerDiff {
+    #[serde(rename = "type")]
+    pub diff_type: String,
+    pub object_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<OwnerInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<OwnerInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TableDiff {
     #[serde(rename = "type")]
     pub diff_type: String,
@@ -80,9 +138,13 @@ pub struct TableDiff {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ddl: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_ddl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_table_comment: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_table_comment: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,24 +174,80 @@ pub struct SchemaDiffPreparationOptions {
     pub source_details: Vec<TableSchemaDetail>,
     #[serde(default)]
     pub target_details: Vec<TableSchemaDetail>,
+    #[serde(default)]
+    pub source_functions: Vec<FunctionInfo>,
+    #[serde(default)]
+    pub target_functions: Vec<FunctionInfo>,
+    #[serde(default)]
+    pub source_sequences: Vec<SequenceInfo>,
+    #[serde(default)]
+    pub target_sequences: Vec<SequenceInfo>,
+    #[serde(default)]
+    pub source_rules: Vec<RuleInfo>,
+    #[serde(default)]
+    pub target_rules: Vec<RuleInfo>,
+    #[serde(default)]
+    pub source_owners: Vec<OwnerInfo>,
+    #[serde(default)]
+    pub target_owners: Vec<OwnerInfo>,
     pub database_type: DatabaseType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_schema: Option<String>,
     #[serde(default)]
     pub ignore_comments: bool,
+    #[serde(default)]
+    pub cascade_delete: bool,
+    #[serde(default)]
+    pub compare_column_order: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDiffPreparation {
     pub diffs: Vec<TableDiff>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub function_diffs: Vec<FunctionDiff>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequence_diffs: Vec<SequenceDiff>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_diffs: Vec<RuleDiff>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_diffs: Vec<OwnerDiff>,
     pub sync_sql: String,
 }
 
 pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffPreparation {
-    let diffs = diff_schema(&options);
-    let sync_sql = generate_schema_sync_sql(&diffs, options.database_type, options.target_schema.as_deref());
-    SchemaDiffPreparation { diffs, sync_sql }
+    let mut diffs = diff_schema(&options);
+    let function_diffs = diff_functions(&options.source_functions, &options.target_functions);
+    let sequence_diffs = diff_sequences(&options.source_sequences, &options.target_sequences);
+    let rule_diffs = diff_rules(&options.source_rules, &options.target_rules);
+    let owner_diffs = diff_owners(&options.source_owners, &options.target_owners);
+    for diff in &mut diffs {
+        let sync_sql = generate_schema_sync_sql(
+            std::slice::from_ref(diff),
+            &[],
+            &[],
+            &[],
+            &[],
+            options.database_type,
+            options.target_schema.as_deref(),
+            options.cascade_delete,
+        );
+        if !sync_sql.is_empty() {
+            diff.sync_sql = Some(sync_sql);
+        }
+    }
+    let sync_sql = generate_schema_sync_sql(
+        &diffs,
+        &function_diffs,
+        &sequence_diffs,
+        &rule_diffs,
+        &owner_diffs,
+        options.database_type,
+        options.target_schema.as_deref(),
+        options.cascade_delete,
+    );
+    SchemaDiffPreparation { diffs, function_diffs, sequence_diffs, rule_diffs, owner_diffs, sync_sql }
 }
 
 fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
@@ -145,25 +263,25 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     let source_table_names: Vec<String> = options
         .source_tables
         .iter()
-        .filter(|table| table.table_type != "VIEW")
+        .filter(|table| !table.table_type.contains("VIEW"))
         .map(|table| table.name.clone())
         .collect();
     let target_table_names: Vec<String> = options
         .target_tables
         .iter()
-        .filter(|table| table.table_type != "VIEW")
+        .filter(|table| !table.table_type.contains("VIEW"))
         .map(|table| table.name.clone())
         .collect();
     let source_view_names: Vec<String> = options
         .source_tables
         .iter()
-        .filter(|table| table.table_type == "VIEW")
+        .filter(|table| table.table_type.contains("VIEW"))
         .map(|table| table.name.clone())
         .collect();
     let target_view_names: Vec<String> = options
         .target_tables
         .iter()
-        .filter(|table| table.table_type == "VIEW")
+        .filter(|table| table.table_type.contains("VIEW"))
         .map(|table| table.name.clone())
         .collect();
 
@@ -176,6 +294,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             diff_type: "added".to_string(),
             object_type: Some("table".to_string()),
             ddl: source_details.get(name.as_str()).and_then(|detail| detail.ddl.clone()),
+            target_ddl: None,
             name,
             columns: None,
             indexes: None,
@@ -183,10 +302,12 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             triggers: None,
             source_table_comment: None,
             target_table_comment: None,
+            sync_sql: None,
         });
     }
 
     for name in removed {
+        let name_clone = name.clone();
         result.push(TableDiff {
             diff_type: "removed".to_string(),
             object_type: Some("table".to_string()),
@@ -196,12 +317,15 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             foreign_keys: None,
             triggers: None,
             ddl: None,
+            target_ddl: target_details.get(name_clone.as_str()).and_then(|detail| detail.ddl.clone()),
             source_table_comment: None,
             target_table_comment: None,
+            sync_sql: None,
         });
     }
 
     for name in added_views {
+        let name_clone = name.clone();
         result.push(TableDiff {
             diff_type: "added".to_string(),
             object_type: Some("view".to_string()),
@@ -210,13 +334,16 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             indexes: None,
             foreign_keys: None,
             triggers: None,
-            ddl: None,
+            ddl: source_details.get(name_clone.as_str()).and_then(|detail| detail.ddl.clone()),
+            target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            sync_sql: None,
         });
     }
 
     for name in removed_views {
+        let name_clone = name.clone();
         result.push(TableDiff {
             diff_type: "removed".to_string(),
             object_type: Some("view".to_string()),
@@ -226,15 +353,25 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             foreign_keys: None,
             triggers: None,
             ddl: None,
+            target_ddl: target_details.get(name_clone.as_str()).and_then(|detail| detail.ddl.clone()),
             source_table_comment: None,
             target_table_comment: None,
+            sync_sql: None,
         });
     }
 
     for name in common {
         let Some(source) = source_details.get(name.as_str()) else { continue };
         let Some(target) = target_details.get(name.as_str()) else { continue };
-        let column_diffs = diff_columns_with_options(&source.columns, &target.columns, options.ignore_comments);
+        let column_diffs = diff_columns_with_options(
+            &source.columns,
+            &target.columns,
+            ColumnDiffOptions {
+                ignore_comments: options.ignore_comments,
+                compare_column_order: options.compare_column_order,
+                case_insensitive_names: column_names_are_case_insensitive(options.database_type),
+            },
+        );
         let index_diffs = diff_indexes(&source.indexes, &target.indexes);
         let foreign_key_diffs = diff_foreign_keys(&source.foreign_keys, &target.foreign_keys);
         let trigger_diffs = diff_triggers(&source.triggers, &target.triggers);
@@ -243,27 +380,30 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         let comment_changed = !options.ignore_comments
             && source_comment.clone().unwrap_or_default() != target_comment.clone().unwrap_or_default();
 
-        if !column_diffs.is_empty()
+        let has_diff = !column_diffs.is_empty()
             || !index_diffs.is_empty()
             || !foreign_key_diffs.is_empty()
             || !trigger_diffs.is_empty()
-            || comment_changed
-        {
-            result.push(TableDiff {
-                diff_type: "modified".to_string(),
-                object_type: Some("table".to_string()),
-                name,
-                columns: (!column_diffs.is_empty()).then_some(column_diffs),
-                indexes: (!index_diffs.is_empty()).then_some(index_diffs),
-                foreign_keys: (!foreign_key_diffs.is_empty()).then_some(foreign_key_diffs),
-                triggers: (!trigger_diffs.is_empty()).then_some(trigger_diffs),
-                ddl: None,
-                source_table_comment: comment_changed.then_some(source_comment),
-                target_table_comment: comment_changed.then_some(target_comment),
-            });
-        }
+            || comment_changed;
+
+        let name_clone = name.clone();
+        result.push(TableDiff {
+            diff_type: if has_diff { "modified".to_string() } else { "none".to_string() },
+            object_type: Some("table".to_string()),
+            name,
+            columns: if has_diff { (!column_diffs.is_empty()).then_some(column_diffs) } else { None },
+            indexes: if has_diff { (!index_diffs.is_empty()).then_some(index_diffs) } else { None },
+            foreign_keys: if has_diff { (!foreign_key_diffs.is_empty()).then_some(foreign_key_diffs) } else { None },
+            triggers: if has_diff { (!trigger_diffs.is_empty()).then_some(trigger_diffs) } else { None },
+            ddl: source_details.get(name_clone.as_str()).and_then(|detail| detail.ddl.clone()),
+            target_ddl: target_details.get(name_clone.as_str()).and_then(|detail| detail.ddl.clone()),
+            source_table_comment: if has_diff { comment_changed.then_some(source_comment) } else { None },
+            target_table_comment: if has_diff { comment_changed.then_some(target_comment) } else { None },
+            sync_sql: None,
+        });
     }
 
+    result.retain(|diff| diff.diff_type != "none");
     result
 }
 
@@ -278,17 +418,50 @@ fn diff_names(source: &[String], target: &[String]) -> (Vec<String>, Vec<String>
 }
 
 pub fn diff_columns(source: &[ColumnInfo], target: &[ColumnInfo]) -> Vec<ColumnDiff> {
-    diff_columns_with_options(source, target, false)
+    diff_columns_with_options(source, target, ColumnDiffOptions::default())
 }
 
-fn diff_columns_with_options(source: &[ColumnInfo], target: &[ColumnInfo], ignore_comments: bool) -> Vec<ColumnDiff> {
-    let mut diffs = Vec::new();
-    let target_map: HashMap<&str, &ColumnInfo> = target.iter().map(|column| (column.name.as_str(), column)).collect();
-    let source_map: HashMap<&str, &ColumnInfo> = source.iter().map(|column| (column.name.as_str(), column)).collect();
+#[derive(Debug, Clone, Copy, Default)]
+struct ColumnDiffOptions {
+    ignore_comments: bool,
+    compare_column_order: bool,
+    case_insensitive_names: bool,
+}
 
-    for source_column in source {
-        if let Some(target_column) = target_map.get(source_column.name.as_str()) {
+fn diff_columns_with_options(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    options: ColumnDiffOptions,
+) -> Vec<ColumnDiff> {
+    let mut diffs = Vec::new();
+    let target_map: HashMap<String, &ColumnInfo> = target
+        .iter()
+        .map(|column| (column_name_match_key(&column.name, options.case_insensitive_names), column))
+        .collect();
+    let source_map: HashMap<String, &ColumnInfo> = source
+        .iter()
+        .map(|column| (column_name_match_key(&column.name, options.case_insensitive_names), column))
+        .collect();
+    let target_position_map: HashMap<&str, usize> =
+        target.iter().enumerate().map(|(index, column)| (column.name.as_str(), index)).collect();
+    let target_normalized_position_map: HashMap<String, usize> = target
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column_name_match_key(&column.name, options.case_insensitive_names), index))
+        .collect();
+    let can_compare_order = options.compare_column_order
+        && source.len() == target.len()
+        && source.iter().all(|column| {
+            target_map.contains_key(&column_name_match_key(&column.name, options.case_insensitive_names))
+        });
+
+    for (source_index, source_column) in source.iter().enumerate() {
+        let source_name_key = column_name_match_key(&source_column.name, options.case_insensitive_names);
+        if let Some(target_column) = target_map.get(&source_name_key) {
             let mut changes = Vec::new();
+            if options.case_insensitive_names && source_column.name != target_column.name {
+                changes.push(format!("name: {} → {}", target_column.name, source_column.name));
+            }
             if source_column.data_type.to_lowercase() != target_column.data_type.to_lowercase() {
                 changes.push(format!("type: {} → {}", target_column.data_type, source_column.data_type));
             }
@@ -308,7 +481,7 @@ fn diff_columns_with_options(source: &[ColumnInfo], target: &[ColumnInfo], ignor
                     source_column.column_default.as_deref().unwrap_or("NULL")
                 ));
             }
-            if !ignore_comments
+            if !options.ignore_comments
                 && source_column.comment.as_deref().unwrap_or_default()
                     != target_column.comment.as_deref().unwrap_or_default()
             {
@@ -317,6 +490,18 @@ fn diff_columns_with_options(source: &[ColumnInfo], target: &[ColumnInfo], ignor
                     target_column.comment.as_deref().unwrap_or_default(),
                     source_column.comment.as_deref().unwrap_or_default()
                 ));
+            }
+            if can_compare_order {
+                let target_index = if options.case_insensitive_names {
+                    target_normalized_position_map.get(&source_name_key)
+                } else {
+                    target_position_map.get(source_column.name.as_str())
+                };
+                if let Some(target_index) = target_index {
+                    if source_index != *target_index {
+                        changes.push(format!("order: {} → {}", *target_index + 1, source_index + 1));
+                    }
+                }
             }
             if !changes.is_empty() {
                 diffs.push(ColumnDiff {
@@ -339,7 +524,7 @@ fn diff_columns_with_options(source: &[ColumnInfo], target: &[ColumnInfo], ignor
     }
 
     for target_column in target {
-        if !source_map.contains_key(target_column.name.as_str()) {
+        if !source_map.contains_key(&column_name_match_key(&target_column.name, options.case_insensitive_names)) {
             diffs.push(ColumnDiff {
                 diff_type: "removed".to_string(),
                 name: target_column.name.clone(),
@@ -351,6 +536,20 @@ fn diff_columns_with_options(source: &[ColumnInfo], target: &[ColumnInfo], ignor
     }
 
     diffs
+}
+
+fn column_name_match_key(name: &str, case_insensitive: bool) -> String {
+    if case_insensitive {
+        name.to_ascii_lowercase()
+    } else {
+        name.to_string()
+    }
+}
+
+fn column_names_are_case_insensitive(db_type: DatabaseType) -> bool {
+    // MySQL documents column identifiers as case-insensitive on every platform; exact matching would turn
+    // a case-only rename into a destructive add/drop plan.
+    matches!(db_type, DatabaseType::Mysql)
 }
 
 pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff> {
@@ -550,8 +749,235 @@ pub fn diff_triggers(source: &[TriggerInfo], target: &[TriggerInfo]) -> Vec<Trig
     diffs
 }
 
+fn is_mysql_like(db_type: DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::Goldendb
+            | DatabaseType::Sundb
+            | DatabaseType::Databend
+            | DatabaseType::Gbase
+    )
+}
+
+/// Normalize a function definition for comparison by:
+/// - Converting CRLF to LF
+/// - Collapsing all whitespace (tabs, multiple spaces) to single spaces
+/// - Trimming each line and rejoining
+fn normalize_definition(def: &str) -> String {
+    def.replace("\r\n", "\n")
+        .split('\n')
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn diff_functions(source: &[FunctionInfo], target: &[FunctionInfo]) -> Vec<FunctionDiff> {
+    let mut diffs = Vec::new();
+    // Use (name, arguments) as key to support PostgreSQL function overloading
+    let target_map: HashMap<(&str, &str), &FunctionInfo> =
+        target.iter().map(|f| ((f.name.as_str(), f.arguments.as_str()), f)).collect();
+    let source_map: HashMap<(&str, &str), &FunctionInfo> =
+        source.iter().map(|f| ((f.name.as_str(), f.arguments.as_str()), f)).collect();
+
+    for source_fn in source {
+        let key = (source_fn.name.as_str(), source_fn.arguments.as_str());
+        let Some(target_fn) = target_map.get(&key) else {
+            diffs.push(FunctionDiff {
+                diff_type: "added".to_string(),
+                name: source_fn.name.clone(),
+                source: Some(source_fn.clone()),
+                target: None,
+                changes: Vec::new(),
+            });
+            continue;
+        };
+
+        let mut changes = Vec::new();
+        if source_fn.function_type != target_fn.function_type {
+            changes.push(format!("type: {} → {}", target_fn.function_type, source_fn.function_type));
+        }
+        if source_fn.data_type != target_fn.data_type {
+            changes.push(format!("return type: {} → {}", target_fn.data_type, source_fn.data_type));
+        }
+        if normalize_definition(&source_fn.definition) != normalize_definition(&target_fn.definition) {
+            changes.push("definition changed".to_string());
+        }
+        if !changes.is_empty() {
+            diffs.push(FunctionDiff {
+                diff_type: "modified".to_string(),
+                name: source_fn.name.clone(),
+                source: Some(source_fn.clone()),
+                target: Some((*target_fn).clone()),
+                changes,
+            });
+        }
+    }
+
+    for target_fn in target {
+        let key = (target_fn.name.as_str(), target_fn.arguments.as_str());
+        if !source_map.contains_key(&key) {
+            diffs.push(FunctionDiff {
+                diff_type: "removed".to_string(),
+                name: target_fn.name.clone(),
+                source: None,
+                target: Some(target_fn.clone()),
+                changes: Vec::new(),
+            });
+        }
+    }
+
+    diffs
+}
+
+pub fn diff_sequences(source: &[SequenceInfo], target: &[SequenceInfo]) -> Vec<SequenceDiff> {
+    let mut diffs = Vec::new();
+    let target_map: HashMap<&str, &SequenceInfo> = target.iter().map(|s| (s.name.as_str(), s)).collect();
+    let source_map: HashMap<&str, &SequenceInfo> = source.iter().map(|s| (s.name.as_str(), s)).collect();
+
+    for source_seq in source {
+        let Some(target_seq) = target_map.get(source_seq.name.as_str()) else {
+            diffs.push(SequenceDiff {
+                diff_type: "added".to_string(),
+                name: source_seq.name.clone(),
+                source: Some(source_seq.clone()),
+                target: None,
+                changes: Vec::new(),
+            });
+            continue;
+        };
+
+        let mut changes = Vec::new();
+        if source_seq.data_type != target_seq.data_type {
+            changes.push(format!("data_type: {} → {}", target_seq.data_type, source_seq.data_type));
+        }
+        if source_seq.start_value != target_seq.start_value {
+            changes.push(format!("start: {} → {}", target_seq.start_value, source_seq.start_value));
+        }
+        if source_seq.min_value != target_seq.min_value {
+            changes.push(format!("min: {} → {}", target_seq.min_value, source_seq.min_value));
+        }
+        if source_seq.max_value != target_seq.max_value {
+            changes.push(format!("max: {} → {}", target_seq.max_value, source_seq.max_value));
+        }
+        if source_seq.increment != target_seq.increment {
+            changes.push(format!("increment: {} → {}", target_seq.increment, source_seq.increment));
+        }
+        if source_seq.cycle != target_seq.cycle {
+            changes.push(format!("cycle: {} → {}", target_seq.cycle, source_seq.cycle));
+        }
+        // Only compare last_value when both sides successfully retrieved it.
+        // Avoid false positives when one side lacks permission (returns None).
+        if let (Some(s), Some(t)) = (&source_seq.last_value, &target_seq.last_value) {
+            if s != t {
+                changes.push(format!("last_value: {} → {}", t, s));
+            }
+        }
+        if !changes.is_empty() {
+            diffs.push(SequenceDiff {
+                diff_type: "modified".to_string(),
+                name: source_seq.name.clone(),
+                source: Some(source_seq.clone()),
+                target: Some((*target_seq).clone()),
+                changes,
+            });
+        }
+    }
+
+    for target_seq in target {
+        if !source_map.contains_key(target_seq.name.as_str()) {
+            diffs.push(SequenceDiff {
+                diff_type: "removed".to_string(),
+                name: target_seq.name.clone(),
+                source: None,
+                target: Some(target_seq.clone()),
+                changes: Vec::new(),
+            });
+        }
+    }
+
+    diffs
+}
+
+pub fn diff_rules(source: &[RuleInfo], target: &[RuleInfo]) -> Vec<RuleDiff> {
+    let mut diffs = Vec::new();
+    let target_map: HashMap<&str, &RuleInfo> = target.iter().map(|r| (r.name.as_str(), r)).collect();
+    let source_map: HashMap<&str, &RuleInfo> = source.iter().map(|r| (r.name.as_str(), r)).collect();
+
+    for source_rule in source {
+        let Some(target_rule) = target_map.get(source_rule.name.as_str()) else {
+            diffs.push(RuleDiff {
+                diff_type: "added".to_string(),
+                name: source_rule.name.clone(),
+                source: Some(source_rule.clone()),
+                target: None,
+                changes: Vec::new(),
+            });
+            continue;
+        };
+
+        let mut changes = Vec::new();
+        if source_rule.definition != target_rule.definition {
+            changes.push("definition changed".to_string());
+        }
+        if !changes.is_empty() {
+            diffs.push(RuleDiff {
+                diff_type: "modified".to_string(),
+                name: source_rule.name.clone(),
+                source: Some(source_rule.clone()),
+                target: Some((*target_rule).clone()),
+                changes,
+            });
+        }
+    }
+
+    for target_rule in target {
+        if !source_map.contains_key(target_rule.name.as_str()) {
+            diffs.push(RuleDiff {
+                diff_type: "removed".to_string(),
+                name: target_rule.name.clone(),
+                source: None,
+                target: Some(target_rule.clone()),
+                changes: Vec::new(),
+            });
+        }
+    }
+
+    diffs
+}
+
+pub fn diff_owners(source: &[OwnerInfo], target: &[OwnerInfo]) -> Vec<OwnerDiff> {
+    let mut diffs = Vec::new();
+    let target_map: HashMap<&str, &OwnerInfo> = target.iter().map(|o| (o.object_name.as_str(), o)).collect();
+    let _source_map: HashMap<&str, &OwnerInfo> = source.iter().map(|o| (o.object_name.as_str(), o)).collect();
+
+    for source_owner in source {
+        let Some(target_owner) = target_map.get(source_owner.object_name.as_str()) else {
+            continue; // skip added/removed objects, only compare owners for common objects
+        };
+
+        let mut changes = Vec::new();
+        if source_owner.owner != target_owner.owner {
+            changes.push(format!("owner: {} → {}", target_owner.owner, source_owner.owner));
+        }
+        if !changes.is_empty() {
+            diffs.push(OwnerDiff {
+                diff_type: "modified".to_string(),
+                object_name: source_owner.object_name.clone(),
+                source: Some(source_owner.clone()),
+                target: Some((*target_owner).clone()),
+                changes,
+            });
+        }
+    }
+
+    diffs
+}
+
 fn quote_id(name: &str, db_type: DatabaseType) -> String {
-    if matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks) {
+    if is_mysql_like(db_type) {
         format!("`{}`", name.replace('`', "``"))
     } else {
         format!("\"{}\"", name.replace('"', "\"\""))
@@ -566,7 +992,7 @@ fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
     if let Some(default) = &col.column_default {
         definition.push_str(&format!(" DEFAULT {default}"));
     }
-    if matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks) {
+    if is_mysql_like(db_type) {
         if let Some(comment) = &col.comment {
             definition.push_str(&format!(" COMMENT {}", comment_literal(comment)));
         }
@@ -576,6 +1002,8 @@ fn column_def(col: &ColumnInfo, db_type: DatabaseType) -> String {
 
 fn qualified_name(name: &str, db_type: DatabaseType, schema: Option<&str>) -> String {
     schema
+        .map(str::trim)
+        .filter(|schema| !schema.is_empty())
         .map(|schema| format!("{}.{}", quote_id(schema, db_type), quote_id(name, db_type)))
         .unwrap_or_else(|| quote_id(name, db_type))
 }
@@ -583,7 +1011,7 @@ fn qualified_name(name: &str, db_type: DatabaseType, schema: Option<&str>) -> St
 fn drop_index_sql(table_name: &str, index_name: &str, db_type: DatabaseType, schema: Option<&str>) -> String {
     let table = qualified_name(table_name, db_type, schema);
     let index = qualified_name(index_name, db_type, schema);
-    if matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks) {
+    if is_mysql_like(db_type) {
         format!("DROP INDEX {} ON {table};", quote_id(index_name, db_type))
     } else {
         format!("DROP INDEX IF EXISTS {index};")
@@ -605,6 +1033,8 @@ fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseType, 
     } else {
         String::new()
     };
+    let mysql_using =
+        if !index_type.is_empty() && is_mysql_like(db_type) { format!(" USING {index_type}") } else { String::new() };
     let included_columns = index.included_columns.clone().unwrap_or_default();
     let include_clause =
         if !included_columns.is_empty() && matches!(db_type, DatabaseType::Postgres | DatabaseType::SqlServer) {
@@ -618,16 +1048,29 @@ fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseType, 
     let supports_where = matches!(db_type, DatabaseType::Postgres | DatabaseType::SqlServer | DatabaseType::Sqlite);
     let filter = if supports_where { index.filter.as_deref().unwrap_or_default() } else { "" };
     let filter_clause = if filter.is_empty() { String::new() } else { format!(" WHERE {filter}") };
-    format!(
-        "CREATE {unique}{type_prefix}INDEX {} ON {table}{using_clause} ({columns}){include_clause}{filter_clause};",
-        quote_id(&index.name, db_type)
-    )
+    let comment = index.comment.as_deref().unwrap_or("");
+    let comment_clause = if !comment.trim().is_empty() && is_mysql_like(db_type) {
+        format!(" COMMENT {}", comment_literal(comment))
+    } else {
+        String::new()
+    };
+    if is_mysql_like(db_type) {
+        format!(
+            "CREATE {unique}{type_prefix}INDEX {}{mysql_using} ON {table} ({columns}){comment_clause};",
+            quote_id(&index.name, db_type)
+        )
+    } else {
+        format!(
+            "CREATE {unique}{type_prefix}INDEX {} ON {table}{using_clause} ({columns}){include_clause}{filter_clause};",
+            quote_id(&index.name, db_type)
+        )
+    }
 }
 
 fn drop_foreign_key_sql(table_name: &str, fk_name: &str, db_type: DatabaseType, schema: Option<&str>) -> String {
     let table = qualified_name(table_name, db_type, schema);
     let fk = quote_id(fk_name, db_type);
-    if matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks) {
+    if is_mysql_like(db_type) {
         format!("ALTER TABLE {table} DROP FOREIGN KEY {fk};")
     } else {
         format!("ALTER TABLE {table} DROP CONSTRAINT {fk};")
@@ -645,9 +1088,9 @@ fn add_foreign_key_sql(table_name: &str, fk: &ForeignKeyInfo, db_type: DatabaseT
     )
 }
 
-fn drop_object_sql(diff: &TableDiff, db_type: DatabaseType, schema: Option<&str>) -> String {
+fn drop_object_sql(diff: &TableDiff, db_type: DatabaseType, schema: Option<&str>, cascade: &str) -> String {
     let object_type = if diff.object_type.as_deref() == Some("view") { "VIEW" } else { "TABLE" };
-    format!("DROP {object_type} IF EXISTS {};", qualified_name(&diff.name, db_type, schema))
+    format!("DROP {object_type} IF EXISTS {}{cascade};", qualified_name(&diff.name, db_type, schema))
 }
 
 fn comment_literal(comment: &str) -> String {
@@ -661,7 +1104,7 @@ fn column_comment_sql(
     db_type: DatabaseType,
     schema: Option<&str>,
 ) -> String {
-    if matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks) {
+    if is_mysql_like(db_type) {
         return format!(
             "-- Column comment for {column_name}: use ALTER TABLE ... MODIFY COLUMN to set comment in MySQL"
         );
@@ -672,16 +1115,27 @@ fn column_comment_sql(
 
 fn table_comment_sql(table_name: &str, comment: &str, db_type: DatabaseType, schema: Option<&str>) -> String {
     let table = qualified_name(table_name, db_type, schema);
-    if matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks) {
+    if is_mysql_like(db_type) {
         format!("ALTER TABLE {table} COMMENT = {};", comment_literal(comment))
     } else {
         format!("COMMENT ON TABLE {table} IS {};", comment_literal(comment))
     }
 }
 
-pub fn generate_schema_sync_sql(diffs: &[TableDiff], db_type: DatabaseType, schema: Option<&str>) -> String {
+#[allow(clippy::too_many_arguments)]
+pub fn generate_schema_sync_sql(
+    diffs: &[TableDiff],
+    function_diffs: &[FunctionDiff],
+    sequence_diffs: &[SequenceDiff],
+    rule_diffs: &[RuleDiff],
+    owner_diffs: &[OwnerDiff],
+    db_type: DatabaseType,
+    schema: Option<&str>,
+    cascade_delete: bool,
+) -> String {
     let mut lines = Vec::new();
-    let is_mysql = matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks);
+    let is_mysql = is_mysql_like(db_type);
+    let cascade = if cascade_delete { " CASCADE" } else { "" };
 
     for diff in diffs {
         let table = qualified_name(&diff.name, db_type, schema);
@@ -702,7 +1156,7 @@ pub fn generate_schema_sync_sql(diffs: &[TableDiff], db_type: DatabaseType, sche
 
         if diff.diff_type == "removed" {
             lines.push(format!("-- Drop {}: {}", diff.object_type.as_deref().unwrap_or("table"), diff.name));
-            lines.push(drop_object_sql(diff, db_type, schema));
+            lines.push(drop_object_sql(diff, db_type, schema, cascade));
             lines.push(String::new());
             continue;
         }
@@ -734,7 +1188,18 @@ pub fn generate_schema_sync_sql(diffs: &[TableDiff], db_type: DatabaseType, sche
                     "modified" => {
                         if let Some(source) = &column.source {
                             if is_mysql {
-                                parts.push(format!("  MODIFY COLUMN {}", column_def(source, db_type)));
+                                let renames_column = column.changes.iter().any(|change| change.starts_with("name:"));
+                                if renames_column {
+                                    if let Some(target) = &column.target {
+                                        parts.push(format!(
+                                            "  CHANGE COLUMN {} {}",
+                                            quote_id(&target.name, db_type),
+                                            column_def(source, db_type)
+                                        ));
+                                    }
+                                } else if column.changes.iter().any(|change| !change.starts_with("order:")) {
+                                    parts.push(format!("  MODIFY COLUMN {}", column_def(source, db_type)));
+                                }
                             } else {
                                 let name = quote_id(&column.name, db_type);
                                 if column.changes.iter().any(|change| change.starts_with("type:")) {
@@ -826,7 +1291,7 @@ pub fn generate_schema_sync_sql(diffs: &[TableDiff], db_type: DatabaseType, sche
         if let Some(foreign_keys) = &diff.foreign_keys {
             for fk in foreign_keys {
                 if fk.diff_type == "added" || fk.diff_type == "modified" {
-                    if let Some(source) = fk.source.as_ref() {
+                    if let Some(source) = &fk.source {
                         lines.push(add_foreign_key_sql(&diff.name, source, db_type, schema));
                     }
                 }
@@ -857,6 +1322,148 @@ pub fn generate_schema_sync_sql(diffs: &[TableDiff], db_type: DatabaseType, sche
         }
     }
 
+    // Function diffs
+    if !function_diffs.is_empty() {
+        lines.push(String::new());
+        lines.push("-- Functions".to_string());
+        for diff in function_diffs {
+            match diff.diff_type.as_str() {
+                "added" => {
+                    if let Some(source) = &diff.source {
+                        lines.push(format!("-- Create function: {}", diff.name));
+                        lines.push(format!(
+                            "CREATE OR REPLACE FUNCTION {} {};",
+                            qualified_name(&diff.name, db_type, schema),
+                            source.definition
+                        ));
+                    }
+                }
+                "removed" => {
+                    lines.push(format!("-- Drop function: {}", diff.name));
+                    lines.push(format!(
+                        "DROP FUNCTION IF EXISTS {}{cascade};",
+                        qualified_name(&diff.name, db_type, schema)
+                    ));
+                }
+                "modified" => {
+                    if let Some(source) = &diff.source {
+                        lines.push(format!("-- Alter function: {}", diff.name));
+                        lines.push(format!(
+                            "CREATE OR REPLACE FUNCTION {} {};",
+                            qualified_name(&diff.name, db_type, schema),
+                            source.definition
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Sequence diffs
+    if !sequence_diffs.is_empty() {
+        lines.push(String::new());
+        lines.push("-- Sequences".to_string());
+        for diff in sequence_diffs {
+            match diff.diff_type.as_str() {
+                "added" => {
+                    if let Some(source) = &diff.source {
+                        lines.push(format!("-- Create sequence: {}", diff.name));
+                        lines.push(format!(
+                            "CREATE SEQUENCE {} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {} {};",
+                            qualified_name(&diff.name, db_type, schema),
+                            source.data_type,
+                            source.start_value,
+                            source.increment,
+                            source.min_value,
+                            source.max_value,
+                            if source.cycle { "CYCLE" } else { "NO CYCLE" }
+                        ));
+                    }
+                }
+                "removed" => {
+                    lines.push(format!("-- Drop sequence: {}", diff.name));
+                    lines.push(format!("DROP SEQUENCE {}{cascade};", qualified_name(&diff.name, db_type, schema)));
+                }
+                "modified" => {
+                    if let Some(source) = &diff.source {
+                        lines.push(format!("-- Alter sequence: {}", diff.name));
+                        lines.push(format!(
+                            "ALTER SEQUENCE {} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {} {};",
+                            qualified_name(&diff.name, db_type, schema),
+                            source.data_type,
+                            source.start_value,
+                            source.increment,
+                            source.min_value,
+                            source.max_value,
+                            if source.cycle { "CYCLE" } else { "NO CYCLE" }
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Rule diffs
+    if !rule_diffs.is_empty() {
+        lines.push(String::new());
+        lines.push("-- Rules".to_string());
+        for diff in rule_diffs {
+            match diff.diff_type.as_str() {
+                "added" => {
+                    if let Some(source) = &diff.source {
+                        lines.push(format!("-- Create rule: {}", diff.name));
+                        lines.push(source.definition.clone());
+                    }
+                }
+                "removed" => {
+                    lines.push(format!("-- Drop rule: {}", diff.name));
+                    if let Some(source) = &diff.source {
+                        lines.push(format!(
+                            "DROP RULE IF EXISTS {} ON {};",
+                            diff.name,
+                            qualified_name(&source.table_name, db_type, schema)
+                        ));
+                    }
+                }
+                "modified" => {
+                    if let Some(source) = &diff.source {
+                        lines.push(format!("-- Alter rule: {}", diff.name));
+                        lines.push(format!(
+                            "DROP RULE IF EXISTS {} ON {};",
+                            diff.name,
+                            qualified_name(&source.table_name, db_type, schema)
+                        ));
+                        lines.push(source.definition.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Owner diffs
+    if !owner_diffs.is_empty() {
+        lines.push(String::new());
+        lines.push("-- Owners".to_string());
+        for diff in owner_diffs {
+            if let (Some(source), Some(_target)) = (&diff.source, &diff.target) {
+                let object_type = match source.object_type.as_str() {
+                    "TABLE" => "TABLE",
+                    "VIEW" => "VIEW",
+                    "SEQUENCE" => "SEQUENCE",
+                    _ => "TABLE",
+                };
+                lines.push(format!(
+                    "ALTER {object_type} {} OWNER TO {};",
+                    qualified_name(&diff.object_name, db_type, schema),
+                    source.owner
+                ));
+            }
+        }
+    }
+
     lines.join("\n").trim().to_string()
 }
 
@@ -884,6 +1491,8 @@ mod tests {
             ref_schema: overrides.ref_schema,
             ref_table: if overrides.ref_table.is_empty() { "users".to_string() } else { overrides.ref_table },
             ref_column: if overrides.ref_column.is_empty() { "id".to_string() } else { overrides.ref_column },
+            on_update: overrides.on_update,
+            on_delete: overrides.on_delete,
         }
     }
 
@@ -899,7 +1508,87 @@ mod tests {
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
         }
+    }
+
+    #[test]
+    fn ignores_column_order_when_option_is_disabled() {
+        let diffs = diff_columns_with_options(
+            &[column("id", "int", None), column("name", "varchar(64)", None), column("status", "varchar(16)", None)],
+            &[column("status", "varchar(16)", None), column("id", "int", None), column("name", "varchar(64)", None)],
+            ColumnDiffOptions::default(),
+        );
+
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn detects_column_order_when_option_is_enabled() {
+        let diffs = diff_columns_with_options(
+            &[column("id", "int", None), column("name", "varchar(64)", None), column("status", "varchar(16)", None)],
+            &[column("status", "varchar(16)", None), column("id", "int", None), column("name", "varchar(64)", None)],
+            ColumnDiffOptions { compare_column_order: true, ..ColumnDiffOptions::default() },
+        );
+
+        assert_eq!(diffs.len(), 3);
+        assert_eq!(diffs[0].changes, vec!["order: 2 → 1"]);
+    }
+
+    #[test]
+    fn keeps_case_sensitive_column_names_distinct_by_default() {
+        let diffs = diff_columns_with_options(
+            &[column("FREEDATE", "datetime", None)],
+            &[column("freedate", "datetime", None)],
+            ColumnDiffOptions::default(),
+        );
+
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].diff_type, "added");
+        assert_eq!(diffs[1].diff_type, "removed");
+    }
+
+    #[test]
+    fn matches_mysql_column_names_case_insensitively() {
+        let diffs = diff_columns_with_options(
+            &[column("FREEDATE", "datetime", None), column("DATETYPE", "char(6)", Some("holiday type"))],
+            &[column("freedate", "datetime", None), column("datetype", "char(6)", Some("holiday type"))],
+            ColumnDiffOptions { case_insensitive_names: true, ..ColumnDiffOptions::default() },
+        );
+
+        assert_eq!(diffs.len(), 2);
+        assert!(diffs.iter().all(|diff| diff.diff_type == "modified"));
+        assert_eq!(diffs[0].changes, vec!["name: freedate → FREEDATE"]);
+        assert_eq!(diffs[1].changes, vec!["name: datetype → DATETYPE"]);
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "c_freedate".to_string(),
+                columns: Some(diffs),
+                indexes: None,
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            None,
+            false,
+        );
+
+        assert!(sql.contains("CHANGE COLUMN `freedate` `FREEDATE` datetime NOT NULL"));
+        assert!(sql.contains("CHANGE COLUMN `datetype` `DATETYPE` char(6) NOT NULL COMMENT 'holiday type'"));
+        assert!(!sql.contains("ADD COLUMN"));
+        assert!(!sql.contains("DROP COLUMN"));
     }
 
     #[test]
@@ -942,6 +1631,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: String::new(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 }),
                 foreign_key(ForeignKeyInfo {
                     name: "orders_account_id_fk".to_string(),
@@ -949,6 +1640,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: "accounts".to_string(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 }),
             ],
             &[
@@ -958,6 +1651,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: "members".to_string(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 }),
                 foreign_key(ForeignKeyInfo {
                     name: "orders_region_id_fk".to_string(),
@@ -965,6 +1660,8 @@ mod tests {
                     ref_schema: None,
                     ref_table: "regions".to_string(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 }),
             ],
         );
@@ -1012,18 +1709,22 @@ mod tests {
                     ref_schema: None,
                     ref_table: "users".to_string(),
                     ref_column: String::new(),
+                    on_update: None,
+                    on_delete: None,
                 })),
                 target: None,
                 changes: Vec::new(),
             }]),
             triggers: None,
             ddl: None,
+            target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            sync_sql: None,
         }];
 
         assert_eq!(
-            generate_schema_sync_sql(&diffs, DatabaseType::Postgres, None),
+            generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Postgres, None, false),
             [
                 "ALTER TABLE \"orders\" DROP CONSTRAINT \"orders_user_id_fk\";",
                 "DROP INDEX IF EXISTS \"idx_orders_status\";",
@@ -1051,12 +1752,14 @@ mod tests {
             foreign_keys: None,
             triggers: None,
             ddl: None,
+            target_ddl: None,
             source_table_comment: Some(Some("用户表".to_string())),
             target_table_comment: Some(Some("Users".to_string())),
+            sync_sql: None,
         }];
 
         assert_eq!(
-            generate_schema_sync_sql(&diffs, DatabaseType::Mysql, None),
+            generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false),
             [
                 "-- Alter table: users",
                 "ALTER TABLE `users`",
@@ -1066,6 +1769,69 @@ mod tests {
             ]
             .join("\n")
         );
+    }
+
+    #[test]
+    fn mysql_schema_sync_sql_qualifies_tables_with_target_database() {
+        let diffs = vec![TableDiff {
+            diff_type: "modified".to_string(),
+            object_type: None,
+            name: "notify_channel_config".to_string(),
+            columns: Some(vec![ColumnDiff {
+                diff_type: "modified".to_string(),
+                name: "config_json".to_string(),
+                source: Some(column("config_json", "json", Some("渠道配置"))),
+                target: Some(column("config_json", "json", Some("Config"))),
+                changes: vec!["comment: Config → 渠道配置".to_string()],
+            }]),
+            indexes: None,
+            foreign_keys: None,
+            triggers: None,
+            ddl: None,
+            target_ddl: None,
+            source_table_comment: None,
+            target_table_comment: None,
+            sync_sql: None,
+        }];
+
+        assert_eq!(
+            generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, Some("target_db"), false),
+            [
+                "-- Alter table: notify_channel_config",
+                "ALTER TABLE `target_db`.`notify_channel_config`",
+                "  MODIFY COLUMN `config_json` json NOT NULL COMMENT '渠道配置';",
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn blank_target_schema_does_not_generate_empty_qualifier() {
+        let diffs = vec![TableDiff {
+            diff_type: "modified".to_string(),
+            object_type: None,
+            name: "notify_channel_config".to_string(),
+            columns: Some(vec![ColumnDiff {
+                diff_type: "modified".to_string(),
+                name: "config_json".to_string(),
+                source: Some(column("config_json", "json", Some("渠道配置"))),
+                target: Some(column("config_json", "json", Some("Config"))),
+                changes: vec!["comment: Config → 渠道配置".to_string()],
+            }]),
+            indexes: None,
+            foreign_keys: None,
+            triggers: None,
+            ddl: None,
+            target_ddl: None,
+            source_table_comment: None,
+            target_table_comment: None,
+            sync_sql: None,
+        }];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, Some("  "), false);
+
+        assert!(sql.contains("ALTER TABLE `notify_channel_config`"));
+        assert!(!sql.contains("``."));
     }
 
     #[test]
@@ -1101,14 +1867,79 @@ mod tests {
                 triggers: Vec::new(),
                 ddl: None,
             }],
+            source_functions: Vec::new(),
+            target_functions: Vec::new(),
+            source_sequences: Vec::new(),
+            target_sequences: Vec::new(),
+            source_rules: Vec::new(),
+            target_rules: Vec::new(),
+            source_owners: Vec::new(),
+            target_owners: Vec::new(),
             database_type: DatabaseType::Mysql,
             target_schema: None,
             ignore_comments: true,
+            cascade_delete: false,
+            compare_column_order: false,
         };
 
         let result = prepare_schema_diff(options);
         assert!(result.diffs.is_empty());
         assert!(result.sync_sql.is_empty());
+    }
+
+    #[test]
+    fn prepare_schema_diff_attaches_per_table_sync_sql() {
+        let options = SchemaDiffPreparationOptions {
+            source_tables: vec![TableInfo {
+                name: "users".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            }],
+            target_tables: vec![TableInfo {
+                name: "users".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            }],
+            source_details: vec![TableSchemaDetail {
+                name: "users".to_string(),
+                columns: vec![column("name", "varchar(128)", None)],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: Some("CREATE TABLE `users` (`name` varchar(128));".to_string()),
+            }],
+            target_details: vec![TableSchemaDetail {
+                name: "users".to_string(),
+                columns: vec![column("name", "varchar(64)", None)],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: Some("CREATE TABLE `users` (`name` varchar(64));".to_string()),
+            }],
+            source_functions: Vec::new(),
+            target_functions: Vec::new(),
+            source_sequences: Vec::new(),
+            target_sequences: Vec::new(),
+            source_rules: Vec::new(),
+            target_rules: Vec::new(),
+            source_owners: Vec::new(),
+            target_owners: Vec::new(),
+            database_type: DatabaseType::Mysql,
+            target_schema: None,
+            ignore_comments: false,
+            cascade_delete: false,
+            compare_column_order: false,
+        };
+
+        let result = prepare_schema_diff(options);
+        let table_sync_sql = result.diffs[0].sync_sql.as_deref().unwrap_or_default();
+
+        assert!(table_sync_sql.contains("ALTER TABLE `users`"));
+        assert!(!table_sync_sql.contains("CREATE TABLE"));
     }
 
     #[test]
@@ -1131,6 +1962,7 @@ mod tests {
                     numeric_precision: None,
                     numeric_scale: None,
                     character_maximum_length: None,
+                    enum_values: None,
                 }),
                 target: None,
                 changes: Vec::new(),
@@ -1154,12 +1986,14 @@ mod tests {
             foreign_keys: None,
             triggers: None,
             ddl: None,
+            target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            sync_sql: None,
         }];
 
         assert_eq!(
-            generate_schema_sync_sql(&diffs, DatabaseType::Postgres, Some("sales")),
+            generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Postgres, Some("sales"), false),
             [
                 "-- Alter table: orders",
                 "ALTER TABLE \"sales\".\"orders\"  ADD COLUMN \"status\" text;",

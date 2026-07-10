@@ -9,33 +9,49 @@ DBX provides configurable keyboard shortcuts for common actions. Use the default
 
 ### Query Editor
 
-| Shortcut | Action |
-|---|---|
-| `Ctrl+Enter` / `Cmd+Enter` | Execute current query |
-| `Ctrl+Shift+Enter` / `Cmd+Shift+Enter` | Execute all queries |
-| `Ctrl+/` / `Cmd+/` | Toggle line comment |
-| `Ctrl+F` / `Cmd+F` | Search in editor |
-| `Ctrl+S` / `Cmd+S` | Save current tab |
-| `Tab` | Indent selected lines |
-| `Shift+Tab` | Outdent selected lines |
+| Shortcut                               | Action                         |
+| -------------------------------------- | ------------------------------ |
+| `Ctrl+Enter` / `Cmd+Enter`             | Execute current query          |
+| `Ctrl+Shift+Enter` / `Cmd+Shift+Enter` | Execute all queries            |
+| `Ctrl+/` / `Cmd+/`                     | Toggle line comment            |
+| `Ctrl+F` / `Cmd+F`                     | Search in editor               |
+| `Ctrl+S` / `Cmd+S`                     | Save current tab               |
+| `Ctrl+A` / `Cmd+A`                     | Select all text                |
+| `Shift+Alt+U`                          | Convert selection to uppercase |
+| `Shift+Alt+L`                          | Convert selection to lowercase |
+| `Tab`                                  | Indent selected lines          |
+| `Shift+Tab`                            | Outdent selected lines         |
 
 ### Data Grid
 
-| Shortcut | Action |
-|---|---|
-| `F5` | Refresh current data |
-| `Ctrl+C` / `Cmd+C` | Copy selected cells |
-| `Ctrl+Shift+C` / `Cmd+Shift+C` | Copy selected rows as INSERT |
-| `Delete` | Delete selected rows (mark for deletion) |
+| Shortcut                       | Action                                   |
+| ------------------------------ | ---------------------------------------- |
+| `F5`                           | Refresh current data                     |
+| `Ctrl+C` / `Cmd+C`             | Copy selected cells                      |
+| `Ctrl+Shift+C` / `Cmd+Shift+C` | Copy selected rows as INSERT             |
+| `Delete`                       | Delete selected rows (mark for deletion) |
 
 ### Navigation
 
-| Shortcut | Action |
-|---|---|
-| `Ctrl+N` / `Cmd+N` | New query tab |
-| `Ctrl+Shift+F` / `Cmd+Shift+F` | Focus sidebar search |
-| `Ctrl+W` / `Cmd+W` | Close current tab |
-| `Middle Click` (on tab) | Close tab |
+| Shortcut                       | Action                              |
+| ------------------------------ | ----------------------------------- |
+| `Ctrl+P` / `Cmd+P`             | Quick open database objects         |
+| `Ctrl+N` / `Cmd+N`             | New query tab                       |
+| `Ctrl+Shift+F` / `Cmd+Shift+F` | Focus sidebar search                |
+| `Ctrl+,` / `Cmd+,`             | Open settings                       |
+| `Ctrl+W` / `Cmd+W`             | Close current tab                   |
+| `Middle Click` (on tab)        | Close tab                           |
+
+## Quick Open (Ctrl+P)
+
+Press **Ctrl+P** (or **Cmd+P** on macOS) to quickly navigate to database objects without using the sidebar:
+
+- Type to search for tables, views, schemas, or databases
+- Fuzzy matching finds objects even with partial names
+- Press Enter to open the selected object
+- Works across all connections in your workspace
+
+Quick open is especially useful when working with large databases where scrolling through the sidebar tree is slow.
 
 ## Configuring Shortcuts
 
@@ -46,9 +62,7 @@ Open **Settings → Shortcuts** to customize key bindings:
 3. Press the new key combination
 4. The new shortcut is saved automatically
 
-<Callout type="info">
-Shortcuts use the Electron-style modifier key notation: `Ctrl` (Control on Windows/Linux), `Cmd` (Command on macOS), `Shift`, and `Alt` (Option on macOS).
-</Callout>
+<Callout type="info">Shortcuts use the Electron-style modifier key notation: `Ctrl` (Control on Windows/Linux), `Cmd` (Command on macOS), `Shift`, and `Alt` (Option on macOS).</Callout>
 
 ## Copy Shortcuts
 

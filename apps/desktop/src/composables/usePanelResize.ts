@@ -1,10 +1,12 @@
 import { ref, type Ref } from "vue";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export function usePanelResize() {
   const sidebarWidth = ref(Number(safeLocalStorageGet("dbx-sidebar-width")) || 260);
   const aiPanelWidth = ref(Number(safeLocalStorageGet("dbx-ai-panel-width")) || 360);
   const historyWidth = ref(Number(safeLocalStorageGet("dbx-history-width")) || 288);
+  const sqlLibraryWidth = ref(Number(safeLocalStorageGet("dbx-sql-library-width")) || 288);
+  const sqlFilePanelWidth = ref(Number(safeLocalStorageGet("dbx-sql-file-panel-width")) || 288);
 
   function startPanelResize(widthRef: Ref<number>, storageKey: string, direction: "left" | "right") {
     return (e: MouseEvent) => {
@@ -31,13 +33,19 @@ export function usePanelResize() {
   const startSidebarResize = startPanelResize(sidebarWidth, "dbx-sidebar-width", "right");
   const startAiPanelResize = startPanelResize(aiPanelWidth, "dbx-ai-panel-width", "left");
   const startHistoryResize = startPanelResize(historyWidth, "dbx-history-width", "left");
+  const startSqlLibraryResize = startPanelResize(sqlLibraryWidth, "dbx-sql-library-width", "left");
+  const startSqlFilePanelResize = startPanelResize(sqlFilePanelWidth, "dbx-sql-file-panel-width", "left");
 
   return {
     sidebarWidth,
     aiPanelWidth,
     historyWidth,
+    sqlLibraryWidth,
+    sqlFilePanelWidth,
     startSidebarResize,
     startAiPanelResize,
     startHistoryResize,
+    startSqlLibraryResize,
+    startSqlFilePanelResize,
   };
 }

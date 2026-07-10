@@ -1,30 +1,14 @@
 <script setup lang="ts">
-import { ref, watch, shallowRef, computed, onMounted } from "vue";
+import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
+import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  CircleHelp,
-  Cloud,
-  Copy,
-  Download,
-  ExternalLink,
-  Loader2,
-  PackageSearch,
-  Pencil,
-  RefreshCw,
-  RotateCcw,
-  Settings,
-  Terminal,
-  Trash2,
-  Upload,
-  X,
-} from "@lucide/vue";
+import { AlertTriangle, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -32,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
@@ -40,61 +24,114 @@ import {
   FONT_FAMILIES,
   DEFAULT_EDITOR_SETTINGS,
   DEFAULT_DESKTOP_SETTINGS,
+  DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
+  DUCKDB_WORKER_MAX_PROCESSES_MAX,
+  DUCKDB_WORKER_MAX_PROCESSES_MIN,
+  normalizeDuckDbWorkerMaxProcesses,
+  normalizeAiEnv,
   type AiProvider,
   type AiApiStyle,
+  type AiAuthMethod,
+  type AiReasoningLevel,
   type EditorTheme,
   type DesktopIconTheme,
+  type InterfaceLayout,
   type DisconnectTabHandlingMode,
+  type OpenTabsRestoreMode,
+  type SqlSemanticDiagnosticsMode,
+  type UpdateDownloadSource,
   type CustomThemeColors,
   type CustomTheme,
 } from "@/stores/settingsStore";
-import { loadEditorTheme, editorFontTheme } from "@/lib/editorThemes";
+import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
-import { isTauriRuntime } from "@/lib/tauriRuntime";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
-import { copyToClipboard } from "@/lib/clipboard";
-import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/debugLog";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
   aiListModels,
   aiTestConnection,
   checkMcpServerStatus,
+  installMcpServer,
+  forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
+  getAppSupportInfo,
   listSystemFonts,
+  saveWebdavSyncSecretsPreference,
   saveWebdavSavedPassword,
   webdavPasswordStatus,
   webdavSyncDownload,
+  webdavSyncSecretsStatus,
   webdavSyncTest,
   webdavSyncUpload,
+  type AppSupportInfo,
   type AiModelInfo,
   type McpServerStatus,
   type WebDavConfig,
-} from "@/lib/api";
-import { eventToShortcut } from "@/lib/keyboardShortcuts";
-import {
-  SHORTCUT_DEFINITIONS,
-  findShortcutConflict,
-  normalizeShortcutSettings,
-  type ShortcutActionId,
-} from "@/lib/shortcutRegistry";
-import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
-import type { SqlSnippet } from "@/types/database";
-import { uuid } from "@/lib/utils";
-import { DEFAULT_SQL_SNIPPETS } from "@/lib/sqlCompletion";
+} from "@/lib/backend/api";
+import { eventToShortcut } from "@/lib/editor/keyboardShortcuts";
+import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
+import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
+import { currentStatementFrameRangeTo, visualSqlColumns } from "@/lib/sql/currentStatementFrame";
+import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
+import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
+import { isWindows } from "@/lib/backend/platform";
+import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
+import { useToast } from "@/composables/useToast";
+import type { DatabaseType, SqlSnippet } from "@/types/database";
+import { uuid } from "@/lib/common/utils";
+import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
-import type { AppThemeAppearance } from "@/lib/appTheme";
+import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
+import { APP_THEME_PALETTES, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
+import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { currentLocale, setLocale, type Locale } from "@/i18n";
-import { LOCALE_OPTIONS } from "@/lib/localeOptions";
+import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
+import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdav/webdavAutoUploadConfig";
+import { apiUrl } from "@/lib/common/webPath";
+import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
 
 const { t } = useI18n();
+const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
-const { isDark } = useTheme();
+const savedSqlStore = useSavedSqlStore();
+const { isDark, themeMode, themePalette, setThemeMode, setThemePalette } = useTheme();
+
+const appThemePaletteOptions = computed(
+  (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
+    APP_THEME_PALETTES.map((palette) => ({
+      value: palette.value,
+      label: t(palette.labelKey),
+      previewColor: palette.previewColor,
+    })),
+);
+const selectedThemePaletteOption = computed(() => appThemePaletteOptions.value.find((option) => option.value === themePalette.value) ?? appThemePaletteOptions.value[0]);
+const selectedLocaleOption = computed(() => LOCALE_OPTIONS.find((locale) => locale.value === currentLocale()) ?? LOCALE_OPTIONS[0]);
+const appThemeModeOptions = computed(() => [
+  { value: "light" as AppThemeMode, label: t("toolbar.themeLight"), icon: Sun },
+  { value: "dark" as AppThemeMode, label: t("toolbar.themeDark"), icon: Moon },
+  { value: "system" as AppThemeMode, label: t("toolbar.themeSystem"), icon: SunMoon },
+]);
+
+let cachedSystemFonts: string[] | null = null;
+let pendingSystemFonts: Promise<string[]> | null = null;
 
 const props = defineProps<{
-  open: boolean;
+  open?: boolean;
+  variant?: "dialog" | "page";
   initialTab?: string;
+  initialSection?: string;
   appVersion?: string;
 }>();
 
@@ -102,47 +139,177 @@ const emit = defineEmits<{
   "update:open": [value: boolean];
 }>();
 
+const isSettingsPage = computed(() => props.variant === "page");
+const settingsVisible = computed(() => isSettingsPage.value || props.open === true);
+const settingsRootComponent = computed(() => (isSettingsPage.value ? "div" : Dialog));
+const settingsRootProps = computed(() => (isSettingsPage.value ? {} : { open: props.open === true }));
+const settingsRootClass = computed(() => (isSettingsPage.value ? "h-full min-h-0 overflow-hidden bg-background" : ""));
+const settingsContentComponent = computed(() => (isSettingsPage.value ? "div" : DialogContent));
+const settingsContentClass = computed(() => (isSettingsPage.value ? "flex h-full min-h-0 flex-col gap-4 overflow-hidden bg-background p-4" : "h-[min(660px,calc(100dvh-80px))] !max-w-[min(920px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:!max-w-[min(920px,calc(100vw-48px))]"));
+const settingsTitleComponent = computed(() => (isSettingsPage.value ? "h2" : DialogTitle));
+
+function onSettingsRootOpenChange(value: boolean) {
+  if (!isSettingsPage.value) emit("update:open", value);
+}
+
+function closeSettings() {
+  emit("update:open", false);
+}
+
+interface TableColumnTemplateOverrideRow {
+  id: string;
+  databaseType: DatabaseType;
+  dataType: string;
+}
+
+interface TableColumnTemplateGridRow {
+  id: string;
+  name: string;
+  defaultValue: string;
+  required: boolean;
+  comment: string;
+  overrides: TableColumnTemplateOverrideRow[];
+}
+
+interface AiEnvRow {
+  id: string;
+  key: string;
+  value: string;
+}
+
+function tableColumnTemplateRowsFromSettings(lines: readonly string[]): TableColumnTemplateGridRow[] {
+  return parseTableColumnTemplateFields([...lines]).map((field) => ({
+    id: uuid(),
+    name: field.name,
+    defaultValue: field.defaultValue ?? "",
+    required: !(field.isNullable ?? false),
+    comment: field.comment ?? "",
+    overrides: Object.entries(field.dataTypesByDatabase).map(([databaseType, dataType]) => ({
+      id: uuid(),
+      databaseType: databaseType as DatabaseType,
+      dataType: dataType === EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE ? "" : dataType,
+    })),
+  }));
+}
+
+function tableColumnTemplateRowsToSettings(rows: readonly TableColumnTemplateGridRow[]): string[] {
+  const seenNames = new Set<string>();
+  const settings: string[] = [];
+  for (const row of rows) {
+    const name = row.name.trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seenNames.has(key)) continue;
+    seenNames.add(key);
+
+    const parts = [name];
+
+    const seenDatabaseTypes = new Set<DatabaseType>();
+    for (const override of row.overrides) {
+      const dataType = override.dataType.trim();
+      if (seenDatabaseTypes.has(override.databaseType)) continue;
+      seenDatabaseTypes.add(override.databaseType);
+      parts.push(`${override.databaseType}:${dataType || EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE}`);
+    }
+    if (!row.required) parts.push("required:false");
+    const defaultValue = row.defaultValue.trim();
+    if (defaultValue) parts.push(`default:${defaultValue}`);
+    const comment = row.comment.trim();
+    if (comment) parts.push(`comment:${comment}`);
+    settings.push(parts.join(" | "));
+  }
+  return settings;
+}
+
+function createEmptyTableColumnTemplateRow(): TableColumnTemplateGridRow {
+  return {
+    id: uuid(),
+    name: "",
+    defaultValue: "",
+    required: true,
+    comment: "",
+    overrides: [],
+  };
+}
+
 // Local edit state
 const editFontFamily = ref(settingsStore.editorSettings.fontFamily);
 const editFontSize = ref(settingsStore.editorSettings.fontSize);
+const editUiFontFamily = ref(settingsStore.editorSettings.uiFontFamily);
 const editUiScale = ref(settingsStore.editorSettings.uiScale);
 const editTheme = ref(settingsStore.editorSettings.theme);
 const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.customThemes]);
 const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
 const showThemeCustomizer = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
+const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
+const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
+const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
+const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
+const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
+const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
+const editSqlSemanticDiagnosticsMode = ref<SqlSemanticDiagnosticsMode>(settingsStore.editorSettings.sqlSemanticDiagnosticsMode);
+const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
+const editConfirmUnsavedSqlClose = ref(settingsStore.editorSettings.confirmUnsavedSqlClose);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
+const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
+const desktopCloseBehaviorResetPending = ref(false);
 const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editDebugLoggingEnabled = ref(settingsStore.desktopSettings.debug_logging_enabled);
+const editDuckDbWorkerProcessIsolation = ref(settingsStore.desktopSettings.duckdb_worker_process_isolation);
+const editDuckDbWorkerMaxProcesses = ref(settingsStore.desktopSettings.duckdb_worker_max_processes);
+const startupDuckDbWorkerProcessIsolation = ref(settingsStore.desktopSettings.duckdb_worker_process_isolation);
+const startupDuckDbWorkerMaxProcesses = ref(settingsStore.desktopSettings.duckdb_worker_max_processes);
+const duckDbWorkerStartupCaptured = ref(false);
+const duckDbRestarting = ref(false);
+const editSidebarTablePageSize = ref(settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
 const debugLogCopied = ref(false);
 const debugLogDownloaded = ref(false);
 const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColumnCommentsInHeader);
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
-const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
+const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
+const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
+const editInfiniteScrollMaxRows = ref(settingsStore.editorSettings.infiniteScrollMaxRows);
+const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields));
+const editTableColumnTemplateDatabaseType = ref<DatabaseType>(TABLE_COLUMN_TEMPLATE_DATABASE_TYPES[0] ?? "mysql");
+const tableColumnTemplateSectionRef = ref<HTMLElement | null>(null);
+const draggedTableColumnTemplateRowId = ref<string | null>(null);
+let tableColumnTemplatePointerDragCleanup: (() => void) | null = null;
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
+const editSqlFormatter = ref<SqlFormatterSettings>(normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter));
+const sqlFormatterConfigValid = ref(true);
 const editingShortcutId = ref<ShortcutActionId | null>(null);
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
+const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
-const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(
-  settingsStore.editorSettings.disconnectTabHandlingMode,
-);
+const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
+const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
 const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
 const editSidebarHideTableComments = ref(settingsStore.editorSettings.sidebarHideTableComments);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
-const redisScanPageSizeOptions = [200, 1000, 5000, 10000];
+const editExportRowLimitEnabled = ref(settingsStore.editorSettings.exportRowLimitEnabled);
+const editExportRowLimit = ref(settingsStore.editorSettings.exportRowLimit);
+const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSettings.queryExportKeysetOptimizationEnabled);
+const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorSettings.updateDownloadSource);
+const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
 const systemFonts = ref<string[]>([]);
 const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
 const uiScaleOptions = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const fontSearchTriggerClass =
+  "h-8 w-full max-w-none justify-between gap-1.5 rounded-[6px] border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-transparent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
+const appearanceFontSearchTriggerClass = `${fontSearchTriggerClass} gap-0 pl-2 pr-1.5`;
+const fontSearchTriggerIconClass = "size-4 text-muted-foreground";
+const appearanceFontSearchTriggerIconClass = "size-2.5 text-muted-foreground";
 const disconnectTabHandlingModeDescriptionKey = computed(() => {
   switch (editDisconnectTabHandlingMode.value) {
     case "close-tabs":
@@ -152,15 +319,161 @@ const disconnectTabHandlingModeDescriptionKey = computed(() => {
     case "keep-tabs-keep-results":
       return "disconnectTabHandlingModeKeepTabsKeepResultsDescription";
   }
+
+  return "disconnectTabHandlingModeCloseTabsDescription";
 });
+const normalizedEditTableColumnTemplateFields = computed(() => tableColumnTemplateRowsToSettings(editTableColumnTemplateRows.value));
+const visibleTableColumnTemplateRows = computed(() =>
+  editTableColumnTemplateRows.value.filter((row) => {
+    if (row.overrides.length === 0) return true;
+    return row.overrides.some((override) => override.databaseType === editTableColumnTemplateDatabaseType.value);
+  }),
+);
 
 // --- Snippet state ---
-const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map((s) => ({ ...s })));
+function editableSnippet(snippet: SqlSnippet): SqlSnippet {
+  return { ...snippet, enabled: snippet.enabled !== false };
+}
+
+const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map(editableSnippet));
+
+function currentEditorSettingsDraft(): EditorSettingsDraft {
+  return {
+    fontFamily: editFontFamily.value,
+    fontSize: editFontSize.value,
+    uiFontFamily: editUiFontFamily.value,
+    uiScale: editUiScale.value,
+    theme: editTheme.value,
+    customThemes: editCustomThemes.value,
+    activeCustomThemeId: editActiveCustomThemeId.value,
+    executeMode: editExecuteMode.value,
+    showExecutionTargetPicker: editShowExecutionTargetPicker.value,
+    showStatementRunButtons: editShowStatementRunButtons.value,
+    showCurrentStatementFrame: editShowCurrentStatementFrame.value,
+    autoAliasTables: editAutoAliasTables.value,
+    wordWrap: editWordWrap.value,
+    vimModeEnabled: editVimModeEnabled.value,
+    autoCloseBrackets: editAutoCloseBrackets.value,
+    sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
+    confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
+    confirmUnsavedSqlClose: editConfirmUnsavedSqlClose.value,
+    appLayout: editAppLayout.value,
+    showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
+    showColumnTypesInHeader: editShowColumnTypesInHeader.value,
+    compactColumnHeaderActions: editCompactColumnHeaderActions.value,
+    dataGridQuickEntry: editDataGridQuickEntry.value,
+    infiniteScroll: editInfiniteScroll.value,
+    infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
+    tableColumnTemplateFields: normalizedEditTableColumnTemplateFields.value,
+    shortcuts: editShortcuts.value,
+    sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
+    sidebarActivation: editSidebarActivation.value,
+    sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
+    autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
+    openTabsRestoreMode: editOpenTabsRestoreMode.value,
+    disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
+    reuseDataTab: editReuseDataTab.value,
+    updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
+    sidebarHideTableComments: editSidebarHideTableComments.value,
+    sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
+    sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
+    exportBatchSize: editExportBatchSize.value,
+    exportRowLimitEnabled: editExportRowLimitEnabled.value,
+    exportRowLimit: editExportRowLimit.value,
+    queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled.value,
+    updateDownloadSource: editUpdateDownloadSource.value,
+    toolbarItems: { ...editToolbarItems.value },
+    snippets: editSnippets.value,
+  };
+}
+
+const editEditorSettingsBase = ref<EditorSettingsDraft>(editorSettingsDraftFromSettings(settingsStore.editorSettings));
+const hasEditorDraftChanges = computed(() => editorSettingsDraftChanged(currentEditorSettingsDraft(), editEditorSettingsBase.value));
 
 const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
 const snippetForm = ref({ label: "", prefix: "", body: "" });
 const snippetFormPrefixError = ref("");
+const iconThemeDescTruncated = { default: ref<boolean>(false), black: ref<boolean>(false) };
+const iconThemeDescRef = {
+  default: ref<HTMLElement | null>(null),
+  black: ref<HTMLElement | null>(null),
+};
+const layoutDescTruncated = { separated: ref<boolean>(false), classic: ref<boolean>(false) };
+const layoutDescRefs = {
+  separated: ref<HTMLElement | null>(null),
+  classic: ref<HTMLElement | null>(null),
+};
+let layoutDescObservers: Record<InterfaceLayout, ResizeObserver | undefined> = {
+  separated: undefined,
+  classic: undefined,
+};
+let iconThemeDescObservers: Record<DesktopIconTheme, ResizeObserver | undefined> = {
+  default: undefined,
+  black: undefined,
+};
+
+function observeElementTruncation(el: Ref<HTMLElement | null>, truncated: Ref<boolean>) {
+  if (!el.value) return;
+
+  const observer = new ResizeObserver(() => {
+    truncated.value = el.value!.scrollWidth > el.value!.clientWidth;
+  });
+
+  observer.observe(el.value);
+  return observer;
+}
+
+function initTruncationObservers() {
+  layoutDescObservers.separated = observeElementTruncation(layoutDescRefs.separated, layoutDescTruncated.separated);
+  layoutDescObservers.classic = observeElementTruncation(layoutDescRefs.classic, layoutDescTruncated.classic);
+  iconThemeDescObservers.default = observeElementTruncation(iconThemeDescRef.default, iconThemeDescTruncated.default);
+  iconThemeDescObservers.black = observeElementTruncation(iconThemeDescRef.black, iconThemeDescTruncated.black);
+}
+
+function cleanupTruncationObservers() {
+  layoutDescObservers.separated?.disconnect();
+  layoutDescObservers.classic?.disconnect();
+  iconThemeDescObservers.default?.disconnect();
+  iconThemeDescObservers.black?.disconnect();
+}
+
+function setLayoutDescRef(layout: InterfaceLayout, el: unknown) {
+  layoutDescRefs[layout].value = el instanceof HTMLElement ? el : null;
+}
+
+function setIconThemeDescRef(theme: DesktopIconTheme, el: unknown) {
+  iconThemeDescRef[theme].value = el instanceof HTMLElement ? el : null;
+}
+
+function checkLayoutDescTruncation() {
+  checkTruncationForRefs([
+    { el: layoutDescRefs.separated, truncated: layoutDescTruncated.separated },
+    { el: layoutDescRefs.classic, truncated: layoutDescTruncated.classic },
+  ]);
+}
+
+function checkIconThemeDescTruncation() {
+  checkTruncationForRefs([
+    { el: iconThemeDescRef.default, truncated: iconThemeDescTruncated.default },
+    { el: iconThemeDescRef.black, truncated: iconThemeDescTruncated.black },
+  ]);
+}
+
+function checkTruncationForRefs(items: Array<{ el: Ref<HTMLElement | null>; truncated: Ref<boolean> }>) {
+  nextTick(() => {
+    for (const item of items) {
+      if (item.el.value) {
+        item.truncated.value = checkElementTruncation(item.el.value);
+      }
+    }
+  });
+}
+
+function checkElementTruncation(el: HTMLElement | null) {
+  return el ? el.scrollWidth > el.clientWidth : false;
+}
 
 function openAddSnippetDialog() {
   snippetEditingId.value = null;
@@ -195,6 +508,7 @@ function saveSnippet() {
         label: snippetForm.value.label.trim() || prefix,
         prefix,
         body: snippetForm.value.body,
+        enabled: editSnippets.value[idx].enabled !== false,
       };
     }
   } else {
@@ -203,9 +517,16 @@ function saveSnippet() {
       label: snippetForm.value.label.trim() || prefix,
       prefix,
       body: snippetForm.value.body,
+      enabled: true,
     });
   }
   snippetDialogOpen.value = false;
+}
+
+function setSnippetEnabled(id: string, enabled: boolean) {
+  const idx = editSnippets.value.findIndex((s) => s.id === id);
+  if (idx === -1) return;
+  editSnippets.value[idx] = { ...editSnippets.value[idx], enabled };
 }
 
 function deleteSnippet(id: string) {
@@ -219,6 +540,8 @@ function confirmDeleteSnippet(snippet: SqlSnippet) {
 }
 
 const presetFontLabels = new Map(FONT_FAMILIES.map((font) => [font.value, font.label]));
+const presetFontValues = new Set(FONT_FAMILIES.map((font) => font.value));
+const uiFontPreviewValues = new Set([DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY]);
 
 function cssFontFamilyForName(name: string): string {
   return `'${name.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}', monospace`;
@@ -243,15 +566,39 @@ const systemFontOptions = computed(() => {
   return [...options];
 });
 
+const uiFontOptions = computed(() => {
+  const options = new Set([SYSTEM_UI_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, ...systemFontOptions.value]);
+  if (editUiFontFamily.value) options.add(editUiFontFamily.value);
+  return [...options];
+});
+
 function displayFontFamily(value: string): string {
   return presetFontLabels.get(value) ?? readableFontFamily(value);
+}
+
+function displayUiFontFamily(value: string): string {
+  if (value === SYSTEM_UI_FONT_FAMILY) return t("settings.uiFontSystemDefault");
+  if (value === DEFAULT_UI_FONT_FAMILY) return t("settings.uiFontAppDefault");
+  return displayFontFamily(value);
+}
+
+function fontOptionStyle(value: string, selectedValue = editFontFamily.value) {
+  return presetFontValues.has(value) || uiFontPreviewValues.has(value) || value === selectedValue ? { fontFamily: value } : undefined;
 }
 
 async function loadSystemFontOptions() {
   if (systemFontsLoaded.value || systemFontsLoading.value) return;
   systemFontsLoading.value = true;
   try {
-    systemFonts.value = await listSystemFonts();
+    if (cachedSystemFonts) {
+      systemFonts.value = cachedSystemFonts;
+    } else {
+      pendingSystemFonts ??= listSystemFonts().finally(() => {
+        pendingSystemFonts = null;
+      });
+      cachedSystemFonts = await pendingSystemFonts;
+      systemFonts.value = cachedSystemFonts;
+    }
     systemFontsLoaded.value = true;
   } catch {
     systemFonts.value = [];
@@ -260,44 +607,83 @@ async function loadSystemFontOptions() {
   }
 }
 
+function syncEditorSettingsDraftFromStore() {
+  editFontFamily.value = settingsStore.editorSettings.fontFamily;
+  editFontSize.value = settingsStore.editorSettings.fontSize;
+  editUiFontFamily.value = settingsStore.editorSettings.uiFontFamily;
+  editUiScale.value = settingsStore.editorSettings.uiScale;
+  editTheme.value = settingsStore.editorSettings.theme;
+  editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
+  editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
+  editExecuteMode.value = settingsStore.editorSettings.executeMode;
+  editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
+  editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
+  editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
+  editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editWordWrap.value = settingsStore.editorSettings.wordWrap;
+  editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
+  editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
+  editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
+  editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
+  editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
+  editConfirmUnsavedSqlClose.value = settingsStore.editorSettings.confirmUnsavedSqlClose;
+  editAppLayout.value = settingsStore.editorSettings.appLayout;
+  editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
+  editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
+  editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
+  editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
+  editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
+  editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
+  editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields);
+  editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+  editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
+  sqlFormatterConfigValid.value = true;
+  editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
+  editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+  editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
+  editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
+  editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
+  editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
+  editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
+  editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
+  editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
+  editSidebarHideTableComments.value = settingsStore.editorSettings.sidebarHideTableComments;
+  editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
+  editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
+  editExportRowLimitEnabled.value = settingsStore.editorSettings.exportRowLimitEnabled;
+  editExportRowLimit.value = settingsStore.editorSettings.exportRowLimit;
+  editQueryExportKeysetOptimizationEnabled.value = settingsStore.editorSettings.queryExportKeysetOptimizationEnabled;
+  editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
+  editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
+  editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
+  editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
+}
+
 // Sync from store when dialog opens
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   (open) => {
     if (open) {
-      editFontFamily.value = settingsStore.editorSettings.fontFamily;
-      editFontSize.value = settingsStore.editorSettings.fontSize;
-      editUiScale.value = settingsStore.editorSettings.uiScale;
-      editTheme.value = settingsStore.editorSettings.theme;
-      editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
-      editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
-      editExecuteMode.value = settingsStore.editorSettings.executeMode;
-      editWordWrap.value = settingsStore.editorSettings.wordWrap;
-      editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
-      editAppLayout.value = settingsStore.editorSettings.appLayout;
+      syncEditorSettingsDraftFromStore();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
-      editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
-      editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
-      editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
-      editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
-      editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
-      editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
-      editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
-      editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
-      editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
-      editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
-      editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
-      editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
-      editSidebarHideTableComments.value = settingsStore.editorSettings.sidebarHideTableComments;
-      editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
-      editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
-      editSnippets.value = settingsStore.editorSettings.snippets.map((s) => ({ ...s }));
-      void loadSystemFontOptions();
+      editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
+      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     }
   },
   { immediate: true },
+);
+
+watch(
+  () => settingsStore.editorSettings,
+  () => {
+    if (settingsVisible.value && !hasEditorDraftChanges.value) {
+      syncEditorSettingsDraftFromStore();
+    }
+  },
+  { deep: true },
 );
 
 const shortcutConflicts = computed(() =>
@@ -306,86 +692,82 @@ const shortcutConflicts = computed(() =>
     return conflict ? [definition.id] : [];
   }),
 );
+const shortcutSearchQuery = ref("");
+const formatterEditorShortcutIds: ShortcutActionId[] = [
+  "formatSql",
+  "toggleLineComment",
+  "find",
+  "replace",
+  "saveSql",
+  "acceptCompletion",
+  "indentMore",
+  "indentLess",
+  "duplicateLine",
+  "deleteLine",
+  "moveLineUp",
+  "moveLineDown",
+  "copyLineUp",
+  "copyLineDown",
+  "undo",
+  "redo",
+  "selectAll",
+  "uppercaseSelection",
+  "lowercaseSelection",
+];
+const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcutIds.map((id) => SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).filter((definition): definition is (typeof SHORTCUT_DEFINITIONS)[number] => !!definition));
+const filteredShortcutDefinitions = computed(() => {
+  const query = shortcutSearchQuery.value.trim().toLowerCase();
+  if (!query) return SHORTCUT_DEFINITIONS;
+  return SHORTCUT_DEFINITIONS.filter((definition) => {
+    const scope = t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`);
+    const shortcut = formatShortcutPill(editShortcuts.value[definition.id]);
+    return [definition.id, t(definition.labelKey), scope, shortcut].some((value) => value.toLowerCase().includes(query));
+  });
+});
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
-const shortcutsChanged = computed(
-  () => JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts),
-);
+const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(editEditorSettingsBase.value.shortcuts));
+const duckDbWorkerSettingsRequireRestart = computed(() => editDuckDbWorkerProcessIsolation.value !== startupDuckDbWorkerProcessIsolation.value || normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== startupDuckDbWorkerMaxProcesses.value);
 const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
+const hasBlockingFormatterConfig = computed(() => activeSettingsTab.value === "formatter" && !sqlFormatterConfigValid.value);
+const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value);
 
 function hasChanges(): boolean {
   return (
-    editFontFamily.value !== settingsStore.editorSettings.fontFamily ||
-    editFontSize.value !== settingsStore.editorSettings.fontSize ||
-    editUiScale.value !== settingsStore.editorSettings.uiScale ||
-    editTheme.value !== settingsStore.editorSettings.theme ||
-    JSON.stringify(editCustomThemes.value) !== JSON.stringify(settingsStore.editorSettings.customThemes) ||
-    editActiveCustomThemeId.value !== settingsStore.editorSettings.activeCustomThemeId ||
-    editExecuteMode.value !== settingsStore.editorSettings.executeMode ||
-    editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
-    editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
-    editAppLayout.value !== settingsStore.editorSettings.appLayout ||
+    hasEditorDraftChanges.value ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
+    editQuitOnClose.value !== settingsStore.desktopSettings.quit_on_close ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editDebugLoggingEnabled.value !== settingsStore.desktopSettings.debug_logging_enabled ||
-    editShowColumnCommentsInHeader.value !== settingsStore.editorSettings.showColumnCommentsInHeader ||
-    editShowColumnTypesInHeader.value !== settingsStore.editorSettings.showColumnTypesInHeader ||
-    editCompactColumnHeaderActions.value !== settingsStore.editorSettings.compactColumnHeaderActions ||
-    editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
-    JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
-    editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
-    editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay ||
-    editAutoSelectActiveSidebarNode.value !== settingsStore.editorSettings.autoSelectActiveSidebarNode ||
-    editDisconnectTabHandlingMode.value !== settingsStore.editorSettings.disconnectTabHandlingMode ||
-    editReuseDataTab.value !== settingsStore.editorSettings.reuseDataTab ||
-    editUpdateNotificationsEnabled.value !== settingsStore.editorSettings.updateNotificationsEnabled ||
-    editSidebarHideTableComments.value !== settingsStore.editorSettings.sidebarHideTableComments ||
-    editSidebarAllowHorizontalScroll.value !== settingsStore.editorSettings.sidebarAllowHorizontalScroll ||
-    editExportBatchSize.value !== settingsStore.editorSettings.exportBatchSize ||
-    JSON.stringify(normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value)) !==
-      JSON.stringify(settingsStore.editorSettings.sidebarHiddenTablePrefixes) ||
-    JSON.stringify(editSnippets.value) !== JSON.stringify(settingsStore.editorSettings.snippets)
+    editDuckDbWorkerProcessIsolation.value !== settingsStore.desktopSettings.duckdb_worker_process_isolation ||
+    normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== settingsStore.desktopSettings.duckdb_worker_max_processes ||
+    editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE)
   );
 }
 
 async function persistSettings() {
-  if (hasBlockingShortcutConflicts.value) return;
-  const sidebarObjectDisplayChanged =
-    editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay;
-  settingsStore.updateEditorSettings({
-    fontFamily: editFontFamily.value,
-    fontSize: editFontSize.value,
-    uiScale: editUiScale.value,
-    theme: editTheme.value,
-    customThemes: editCustomThemes.value,
-    activeCustomThemeId: editActiveCustomThemeId.value,
-    executeMode: editExecuteMode.value,
-    wordWrap: editWordWrap.value,
-    confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
-    appLayout: editAppLayout.value,
-    showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
-    showColumnTypesInHeader: editShowColumnTypesInHeader.value,
-    compactColumnHeaderActions: editCompactColumnHeaderActions.value,
-    redisScanPageSize: editRedisScanPageSize.value,
-    shortcuts: editShortcuts.value,
-    sidebarActivation: editSidebarActivation.value,
-    sidebarObjectDisplay: editSidebarObjectDisplay.value,
-    autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
-    disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
-    reuseDataTab: editReuseDataTab.value,
-    updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
-    sidebarHideTableComments: editSidebarHideTableComments.value,
-    sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
-    sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
-    exportBatchSize: editExportBatchSize.value,
-    snippets: editSnippets.value,
-  });
+  if (hasApplyBlocker.value) return;
+  const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
+  const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
+  const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
+  if (Object.keys(editorSettingsPatch).length > 0) {
+    settingsStore.updateEditorSettings(editorSettingsPatch);
+    editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
+  }
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
+    quit_on_close: editQuitOnClose.value,
+    close_action_prompted: desktopCloseBehaviorResetPending.value ? false : true,
     icon_theme: editIconTheme.value,
     debug_logging_enabled: editDebugLoggingEnabled.value,
+    duckdb_worker_process_isolation: editDuckDbWorkerProcessIsolation.value,
+    duckdb_worker_max_processes: normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value),
+    sidebar_table_page_size: editSidebarTablePageSize.value,
   });
+  desktopCloseBehaviorResetPending.value = false;
   if (sidebarObjectDisplayChanged) {
     await connectionStore.refreshAllTree();
+  } else if (sidebarTablePageSizeChanged) {
+    await connectionStore.refreshSidebarObjectPagination();
   }
 }
 
@@ -395,31 +777,135 @@ async function applySettings() {
 
 async function applySettingsAndClose() {
   await persistSettings();
-  emit("update:open", false);
+  closeSettings();
 }
 
-function resetDefaults() {
+async function restartDbxForDuckDbIsolation() {
+  if (duckDbRestarting.value || hasApplyBlocker.value || isWeb) return;
+  duckDbRestarting.value = true;
+  try {
+    await persistSettings();
+    const { relaunch } = await import("@tauri-apps/plugin-process");
+    await relaunch();
+  } catch (e: any) {
+    toast(t("settings.restartDbxFailed", { error: e?.message || String(e) }), 5000);
+  } finally {
+    duckDbRestarting.value = false;
+  }
+}
+
+function resetDefaultsForTab(tab: SettingsCategory) {
+  if (tab === "editor") {
+    editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
+    editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
+    editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+    editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+    editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
+    editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
+    editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+    editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+    editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
+    editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
+    editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
+    editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
+    editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
+  } else if (tab === "formatter") {
+    editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
+    sqlFormatterConfigValid.value = true;
+  } else if (tab === "appearance") {
+    editUiFontFamily.value = DEFAULT_EDITOR_SETTINGS.uiFontFamily;
+    editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
+    editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
+    editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
+    editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
+    editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
+    editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
+    editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
+    desktopCloseBehaviorResetPending.value = true;
+    editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
+    editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
+  } else if (tab === "navigation") {
+    editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
+    editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+    editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
+    editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+    editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
+    editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
+    editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
+    editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
+    editSidebarHideTableComments.value = DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments;
+    editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
+    editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
+    editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
+  } else if (tab === "data") {
+    editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
+    editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
+    editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
+    editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
+    editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
+    editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
+    editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
+    editDuckDbWorkerMaxProcesses.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_max_processes;
+    editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
+    editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
+    editExportRowLimitEnabled.value = DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled;
+    editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
+    editQueryExportKeysetOptimizationEnabled.value = DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled;
+  } else if (tab === "shortcuts") {
+    editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
+  } else if (tab === "snippets") {
+    editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
+  } else if (tab === "about") {
+    editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+  }
+}
+
+function resetAllDefaults() {
   editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
   editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
+  editUiFontFamily.value = DEFAULT_EDITOR_SETTINGS.uiFontFamily;
   editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
   editTheme.value = DEFAULT_EDITOR_SETTINGS.theme;
   editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+  editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
+  editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
+  editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
+  editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+  editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
+  editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
+  editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
+  editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
+  editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
+  editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
+  desktopCloseBehaviorResetPending.value = true;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
+  editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
+  editDuckDbWorkerMaxProcesses.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_max_processes;
+  editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
-  editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
+  editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
+  editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
+  editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
+  editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
   editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
+  editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
+  sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+  editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
   editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -427,15 +913,153 @@ function resetDefaults() {
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
   editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
   editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
+  editExportRowLimitEnabled.value = DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled;
+  editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
+  editQueryExportKeysetOptimizationEnabled.value = DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled;
+  editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
+  editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
+}
+
+function addTableColumnTemplateRow() {
+  const row = createEmptyTableColumnTemplateRow();
+  row.overrides.push({
+    id: uuid(),
+    databaseType: editTableColumnTemplateDatabaseType.value,
+    dataType: "",
+  });
+  editTableColumnTemplateRows.value.push(row);
+}
+
+function removeTableColumnTemplateRow(id: string) {
+  const row = editTableColumnTemplateRows.value.find((item) => item.id === id);
+  if (!row) return;
+  if (row.overrides.some((override) => override.databaseType === editTableColumnTemplateDatabaseType.value)) {
+    row.overrides = row.overrides.filter((override) => override.databaseType !== editTableColumnTemplateDatabaseType.value);
+    if (row.overrides.length > 0) return;
+  }
+  editTableColumnTemplateRows.value = editTableColumnTemplateRows.value.filter((item) => item.id !== id);
+}
+
+function moveTableColumnTemplateRow(sourceId: string, targetId: string, placement: "before" | "after") {
+  if (!sourceId || sourceId === targetId) return;
+  const rows = [...editTableColumnTemplateRows.value];
+  const sourceIndex = rows.findIndex((row) => row.id === sourceId);
+  const targetIndex = rows.findIndex((row) => row.id === targetId);
+  if (sourceIndex === -1 || targetIndex === -1) return;
+  const [source] = rows.splice(sourceIndex, 1);
+  if (!source) return;
+  const nextTargetIndex = rows.findIndex((row) => row.id === targetId);
+  const insertIndex = placement === "after" ? nextTargetIndex + 1 : nextTargetIndex;
+  rows.splice(nextTargetIndex === -1 ? rows.length : insertIndex, 0, source);
+  editTableColumnTemplateRows.value = rows;
+}
+
+function cleanupTableColumnTemplatePointerDrag() {
+  tableColumnTemplatePointerDragCleanup?.();
+  tableColumnTemplatePointerDragCleanup = null;
+  draggedTableColumnTemplateRowId.value = null;
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+}
+
+function startTableColumnTemplateRowDrag(id: string, event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  cleanupTableColumnTemplatePointerDrag();
+  draggedTableColumnTemplateRowId.value = id;
+  document.body.style.cursor = "grabbing";
+  document.body.style.userSelect = "none";
+
+  const onPointerMove = (moveEvent: PointerEvent) => {
+    const sourceId = draggedTableColumnTemplateRowId.value;
+    if (!sourceId) return;
+    const targetRow = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest<HTMLElement>("[data-table-column-template-row-id]");
+    const targetId = targetRow?.dataset.tableColumnTemplateRowId;
+    if (!targetRow || !targetId || targetId === sourceId) return;
+    const rect = targetRow.getBoundingClientRect();
+    moveTableColumnTemplateRow(sourceId, targetId, moveEvent.clientY > rect.top + rect.height / 2 ? "after" : "before");
+  };
+  const onPointerUp = () => cleanupTableColumnTemplatePointerDrag();
+
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp, { once: true });
+  window.addEventListener("pointercancel", onPointerUp, { once: true });
+  tableColumnTemplatePointerDragCleanup = () => {
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerUp);
+  };
+}
+
+function tableColumnTemplateTypeOptions(databaseType: DatabaseType): string[] {
+  return getDataTypeOptions(databaseType);
+}
+
+function tableColumnTemplateDataTypeForSelectedDatabase(row: TableColumnTemplateGridRow): string {
+  return row.overrides.find((override) => override.databaseType === editTableColumnTemplateDatabaseType.value)?.dataType ?? "";
+}
+
+function tableColumnTemplateBaseTypeForSelectedDatabase(row: TableColumnTemplateGridRow): string {
+  return splitDataType(tableColumnTemplateDataTypeForSelectedDatabase(row)).baseType;
+}
+
+function tableColumnTemplateLengthForSelectedDatabase(row: TableColumnTemplateGridRow): string {
+  return dataTypeLengthInputValue(editTableColumnTemplateDatabaseType.value, tableColumnTemplateDataTypeForSelectedDatabase(row));
+}
+
+function setTableColumnTemplateDataTypeForSelectedDatabase(row: TableColumnTemplateGridRow, value: string) {
+  const dataType = value.trim();
+  const databaseType = editTableColumnTemplateDatabaseType.value;
+  const existing = row.overrides.find((override) => override.databaseType === databaseType);
+  if (!dataType) {
+    row.overrides = row.overrides.filter((override) => override.databaseType !== databaseType);
+    return;
+  }
+  if (existing) {
+    existing.dataType = dataType;
+  } else {
+    row.overrides.push({ id: uuid(), databaseType, dataType });
+  }
+}
+
+function setTableColumnTemplateBaseTypeForSelectedDatabase(row: TableColumnTemplateGridRow, value: string) {
+  const baseType = value.trim();
+  if (!baseType) {
+    setTableColumnTemplateDataTypeForSelectedDatabase(row, "");
+    return;
+  }
+  const databaseType = editTableColumnTemplateDatabaseType.value;
+  setTableColumnTemplateDataTypeForSelectedDatabase(row, combineDataTypeForDatabase(databaseType, baseType, getDefaultLengthForType(databaseType, baseType)));
+}
+
+function setTableColumnTemplateLengthForSelectedDatabase(row: TableColumnTemplateGridRow, value: string) {
+  const databaseType = editTableColumnTemplateDatabaseType.value;
+  const baseType = tableColumnTemplateBaseTypeForSelectedDatabase(row);
+  if (!baseType || isDataTypeLengthDisabled(databaseType, baseType)) return;
+  setTableColumnTemplateDataTypeForSelectedDatabase(row, combineDataTypeForDatabase(databaseType, baseType, value));
+}
+
+function isTableColumnTemplateLengthDisabled(row: TableColumnTemplateGridRow): boolean {
+  const baseType = tableColumnTemplateBaseTypeForSelectedDatabase(row);
+  return !baseType || isDataTypeLengthDisabled(editTableColumnTemplateDatabaseType.value, baseType);
 }
 
 function onExecuteModeChange(v: any) {
   if (v === "all" || v === "current") editExecuteMode.value = v;
 }
 
+function onSqlSemanticDiagnosticsEnabledChange(value: boolean) {
+  editSqlSemanticDiagnosticsEnabled.value = value;
+  editSqlSemanticDiagnosticsMode.value = value ? "enabled" : "disabled";
+}
+
 function onFontFamilyChange(v: any) {
   if (typeof v === "string") editFontFamily.value = v;
+}
+
+function onUiFontFamilyChange(v: any) {
+  if (typeof v === "string") editUiFontFamily.value = v;
 }
 
 const themeSelectValue = computed(() => {
@@ -487,9 +1111,8 @@ function onLocaleChange(v: any) {
   if (typeof v === "string") void setLocale(v as Locale);
 }
 
-function onRedisScanPageSizeChange(v: any) {
-  const value = Number(v);
-  if (redisScanPageSizeOptions.includes(value)) editRedisScanPageSize.value = value;
+function onUpdateDownloadSourceChange(v: any) {
+  if (v === "official" || v === "cnb" || v === "atomgit") editUpdateDownloadSource.value = v;
 }
 
 function setSidebarObjectDisplay(value: "grouped" | "simple") {
@@ -522,28 +1145,7 @@ function onShortcutKeydown(actionId: ShortcutActionId, event: KeyboardEvent) {
 }
 
 function formatShortcutPill(shortcut: string): string {
-  const isMac = globalThis.navigator?.platform?.toLowerCase().includes("mac") ?? false;
-  return shortcut
-    .split("+")
-    .filter(Boolean)
-    .map((part) => {
-      if (part === "Mod") return isMac ? "⌘" : "Ctrl";
-      if (part === "Meta") return isMac ? "⌘" : "Meta";
-      if (part === "Shift") return isMac ? "⇧" : "Shift";
-      if (part === "Alt") return isMac ? "⌥" : "Alt";
-      if (part === "Control" || part === "Ctrl") return isMac ? "⌃" : "Ctrl";
-      if (part === "Enter") return "↵";
-      if (part === "Backspace") return "⌫";
-      if (part === "Delete") return isMac ? "⌦" : "Del";
-      if (part === "Escape") return "Esc";
-      if (part === "ArrowUp") return "↑";
-      if (part === "ArrowDown") return "↓";
-      if (part === "ArrowLeft") return "←";
-      if (part === "ArrowRight") return "→";
-      if (part === " ") return "Space";
-      return part.length === 1 ? part.toUpperCase() : part;
-    })
-    .join(isMac ? " " : " + ");
+  return formatShortcutDisplay(shortcut);
 }
 
 const shortcutPressShortcutLabel = computed(() => t("settings.shortcutPressShortcut"));
@@ -568,7 +1170,11 @@ function resetShortcut(actionId: ShortcutActionId) {
   editShortcuts.value = { ...editShortcuts.value, [actionId]: definition.defaultShortcut };
 }
 
-function setAppLayout(value: "separated" | "classic") {
+function clearShortcut(actionId: ShortcutActionId) {
+  editShortcuts.value = { ...editShortcuts.value, [actionId]: "" };
+}
+
+function setAppLayout(value: InterfaceLayout) {
   editAppLayout.value = value;
 }
 
@@ -576,28 +1182,29 @@ function setSidebarActivation(value: "single" | "double") {
   editSidebarActivation.value = value;
 }
 
-const activeSettingsTab = ref("editor");
+const activeSettingsTab = ref("appearance");
 const isWeb = !isTauriRuntime();
-const displayedAppVersion = computed(() => (props.appVersion ? `v${props.appVersion}` : ""));
-type SettingsCategory =
-  | "editor"
-  | "appearance"
-  | "navigation"
-  | "data"
-  | "redis"
-  | "shortcuts"
-  | "snippets"
-  | "sync"
-  | "ai"
-  | "mcp"
-  | "security"
-  | "about";
+const appSupportInfo = ref<AppSupportInfo | null>(null);
+const appSupportInfoLoading = ref(false);
+const appSupportInfoError = ref("");
+const appSupportInfoCopied = ref(false);
+const appSupportInfoLabels = computed<AppSupportInfoLabels>(() => ({
+  appVersion: t("settings.supportInfoAppVersion"),
+  runtime: t("settings.supportInfoRuntime"),
+  runtimeDesktop: t("settings.supportInfoRuntimeDesktop"),
+  runtimeWeb: t("settings.supportInfoRuntimeWeb"),
+  operatingSystem: t("settings.supportInfoOperatingSystem"),
+  architecture: t("settings.supportInfoArchitecture"),
+  unknown: t("settings.supportInfoUnknown"),
+}));
+const appSupportInfoRows = computed(() => (appSupportInfo.value ? buildAppSupportInfoRows(appSupportInfo.value, appSupportInfoLabels.value) : []));
+type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
 const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
-  { value: "editor", label: t("settings.editorTab") },
   { value: "appearance", label: t("settings.appearanceTab") },
+  { value: "editor", label: t("settings.editorTab") },
+  { value: "formatter", label: t("settings.sqlFormatterTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
-  { value: "redis", label: t("settings.redisTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
   { value: "snippets", label: t("settings.snippetsTab") },
   ...(isWeb ? [] : [{ value: "sync" as const, label: t("settings.syncTab") }]),
@@ -606,27 +1213,14 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
-const settingsTabsWithApplyFooter = new Set<SettingsCategory>([
-  "editor",
-  "appearance",
-  "navigation",
-  "data",
-  "redis",
-  "shortcuts",
-  "snippets",
-]);
+const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
 
 function hasSettingsApplyFooter(value: SettingsCategory): boolean {
   return settingsTabsWithApplyFooter.has(value);
 }
 
 function settingsCategoryButton(value: SettingsCategory): string {
-  return [
-    "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
-    value === activeSettingsTab.value
-      ? "bg-primary text-primary-foreground shadow-sm"
-      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-  ].join(" ");
+  return ["w-auto shrink-0 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm transition-colors lg:w-full", value === activeSettingsTab.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground"].join(" ");
 }
 
 function openExternalUrl(url: string) {
@@ -645,6 +1239,44 @@ async function copyDebugLogs() {
   }, 1500);
 }
 
+function fallbackAppSupportInfo(): AppSupportInfo {
+  return {
+    appVersion: props.appVersion || "",
+    runtime: isWeb ? "web" : "desktop",
+    osName: "",
+    osVersion: null,
+    arch: "",
+  };
+}
+
+async function refreshAppSupportInfo() {
+  if (appSupportInfoLoading.value) return;
+  appSupportInfoLoading.value = true;
+  appSupportInfoError.value = "";
+  try {
+    appSupportInfo.value = await getAppSupportInfo();
+  } catch (e: any) {
+    appSupportInfo.value = appSupportInfo.value || fallbackAppSupportInfo();
+    appSupportInfoError.value = e?.message || String(e);
+  } finally {
+    appSupportInfoLoading.value = false;
+  }
+}
+
+async function copyAppSupportInfo() {
+  if (!appSupportInfo.value) await refreshAppSupportInfo();
+  if (!appSupportInfo.value) return;
+  try {
+    await copyToClipboard(formatAppSupportInfoForClipboard(appSupportInfo.value, appSupportInfoLabels.value));
+    appSupportInfoCopied.value = true;
+    window.setTimeout(() => {
+      appSupportInfoCopied.value = false;
+    }, 1500);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 function clearDebugLogs() {
   clearStoredDebugLogs();
   debugLogCopied.value = false;
@@ -661,16 +1293,24 @@ async function exportDebugLogs() {
 }
 
 // ---------- MCP Server ----------
+type McpConfigTab = "claude" | "cursor" | "trae" | "vscode" | "windsurf" | "codex" | "opencode";
+type McpCopyKind = "install" | `${McpConfigTab}-config`;
+
 const mcpStatus = ref<McpServerStatus | null>(null);
 const mcpStatusLoading = ref(false);
 const mcpStatusError = ref("");
-const mcpCopied = ref<"" | "install" | "claude-config" | "codex-config">("");
-const mcpConfigTab = ref<"claude" | "codex">("claude");
-const mcpReadonlyMode = ref(false);
-const mcpAllowDangerous = ref(false);
+const mcpCopied = ref<"" | McpCopyKind>("");
+const mcpConfigTab = ref<McpConfigTab>("claude");
+const MCP_READONLY_STORAGE_KEY = "dbx-mcp-config-readonly";
+const MCP_ALLOW_DANGEROUS_STORAGE_KEY = "dbx-mcp-config-allow-dangerous";
+const mcpReadonlyMode = ref(localStorage.getItem(MCP_READONLY_STORAGE_KEY) === "true");
+const mcpAllowDangerous = ref(localStorage.getItem(MCP_ALLOW_DANGEROUS_STORAGE_KEY) === "true");
+const mcpInstalling = ref(false);
+const mcpInstallMessage = ref("");
+const mcpInstallError = ref(false);
 
-const mcpEnvEntries = computed(() => {
-  const entries: Array<[string, string]> = [];
+const mcpEnvEntries = computed<McpEnvEntry[]>(() => {
+  const entries: McpEnvEntry[] = [];
   if (mcpReadonlyMode.value) {
     entries.push(["DBX_MCP_ALLOW_WRITES", "0"]);
   }
@@ -680,32 +1320,21 @@ const mcpEnvEntries = computed(() => {
   return entries;
 });
 
-const mcpClaudeRecommendedConfig = computed(() => {
-  const config: Record<string, unknown> = {
-    mcpServers: {
-      dbx: {
-        command: "dbx-mcp-server",
-      } as Record<string, unknown>,
-    },
+const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
+  if (!isWindows() || !mcpStatus.value?.script_path) return undefined;
+  return {
+    command: mcpStatus.value.node_path || "node",
+    args: [mcpStatus.value.script_path],
   };
-  if (mcpEnvEntries.value.length > 0) {
-    const env = Object.fromEntries(mcpEnvEntries.value);
-    ((config.mcpServers as Record<string, any>).dbx as Record<string, unknown>).env = env;
-  }
-  return JSON.stringify(config, null, 2);
 });
 
-const mcpCodexRecommendedConfig = computed(() => {
-  const lines = ["[mcp_servers.dbx]", 'command = "dbx-mcp-server"'];
-  if (mcpEnvEntries.value.length > 0) {
-    lines.push("");
-    lines.push("[mcp_servers.dbx.env]");
-    for (const [key, value] of mcpEnvEntries.value) {
-      lines.push(`${key} = "${value}"`);
-    }
-  }
-  return lines.join("\n");
-});
+const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+
+const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+
+const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+
+const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
 const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
   if (!mcpStatus.value) return "muted";
@@ -728,7 +1357,12 @@ const mcpCommand = computed(() => {
 });
 
 watch(mcpReadonlyMode, (value) => {
+  localStorage.setItem(MCP_READONLY_STORAGE_KEY, String(value));
   if (value) mcpAllowDangerous.value = false;
+});
+
+watch(mcpAllowDangerous, (value) => {
+  localStorage.setItem(MCP_ALLOW_DANGEROUS_STORAGE_KEY, String(value));
 });
 
 async function refreshMcpStatus() {
@@ -744,7 +1378,7 @@ async function refreshMcpStatus() {
   }
 }
 
-async function copyMcpText(kind: "install" | "claude-config" | "codex-config", value: string) {
+async function copyMcpText(kind: McpCopyKind, value: string) {
   mcpCopied.value = kind;
   try {
     await copyToClipboard(value);
@@ -757,32 +1391,54 @@ async function copyMcpText(kind: "install" | "claude-config" | "codex-config", v
   }, 1500);
 }
 
+async function installMcp() {
+  if (mcpInstalling.value) return;
+  mcpInstalling.value = true;
+  mcpInstallMessage.value = "";
+  mcpInstallError.value = false;
+  try {
+    const result = await installMcpServer();
+    mcpInstallMessage.value = result;
+    mcpInstallError.value = false;
+    // 安装成功后刷新状态
+    await refreshMcpStatus();
+  } catch (e: any) {
+    mcpInstallMessage.value = e?.message || String(e);
+    mcpInstallError.value = true;
+  } finally {
+    mcpInstalling.value = false;
+    // 3秒后清除消息
+    window.setTimeout(() => {
+      mcpInstallMessage.value = "";
+      mcpInstallError.value = false;
+    }, 3000);
+  }
+}
+
 // ---------- WebDAV Sync ----------
 const webdavEndpoint = ref(localStorage.getItem("dbx-webdav-endpoint") || "");
 const webdavUsername = ref(localStorage.getItem("dbx-webdav-username") || "");
 const webdavPassword = ref("");
 const webdavRememberPassword = ref(localStorage.getItem("dbx-webdav-remember-password") === "true");
 const webdavHasSavedPassword = ref(false);
-const webdavRemotePath = ref(localStorage.getItem("dbx-webdav-remote-path") || "DBX/sync/snapshot.json");
+const webdavRemotePath = ref(localStorage.getItem("dbx-webdav-remote-path") || DEFAULT_WEB_DAV_REMOTE_PATH);
 const webdavSyncSecrets = ref(false);
 const webdavSecretsPassphrase = ref("");
+const webdavHasSavedSecretsPassphrase = ref(false);
+const webdavAutoUploadEnabled = ref(localStorage.getItem("dbx-webdav-auto-upload-enabled") === "true");
+const webdavAutoUploadIntervalMinutes = ref(Number(localStorage.getItem("dbx-webdav-auto-upload-interval-minutes") || String(DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES)));
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
 
-const webdavReady = computed(
-  () =>
-    !!webdavEndpoint.value.trim() &&
-    !webdavBusy.value &&
-    (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim()),
-);
+const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim() || webdavHasSavedSecretsPassphrase.value));
 
 function currentWebDavConfig(): WebDavConfig {
   return {
     endpoint: webdavEndpoint.value.trim(),
     username: webdavUsername.value.trim() || undefined,
     password: webdavPassword.value || undefined,
-    remotePath: webdavRemotePath.value.trim() || "DBX/sync/snapshot.json",
+    remotePath: webdavRemotePath.value.trim() || DEFAULT_WEB_DAV_REMOTE_PATH,
   };
 }
 
@@ -792,9 +1448,11 @@ function currentWebDavAccountConfig(): WebDavConfig {
 }
 
 function rememberWebDavFields() {
-  localStorage.setItem("dbx-webdav-endpoint", webdavEndpoint.value.trim());
-  localStorage.setItem("dbx-webdav-username", webdavUsername.value.trim());
-  localStorage.setItem("dbx-webdav-remote-path", webdavRemotePath.value.trim() || "DBX/sync/snapshot.json");
+  writeWebDavAutoUploadFields(currentWebDavConfig(), {
+    enabled: webdavAutoUploadEnabled.value,
+    intervalMinutes: webdavAutoUploadIntervalMinutes.value,
+  });
+  window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));
 }
 
 function setWebDavResult(message: string, error = false) {
@@ -809,6 +1467,7 @@ async function runWebDavAction(kind: "test" | "upload" | "download", action: () 
   try {
     rememberWebDavFields();
     await applyWebDavPasswordPreference();
+    await applyWebDavSyncSecretsPreference();
     setWebDavResult(await action());
   } catch (e: any) {
     setWebDavResult(e?.message || String(e), true);
@@ -845,6 +1504,40 @@ async function applyWebDavPasswordPreference() {
   }
 }
 
+async function refreshWebDavSyncSecretsStatus() {
+  try {
+    const status = await webdavSyncSecretsStatus();
+    webdavSyncSecrets.value = status.enabled;
+    webdavHasSavedSecretsPassphrase.value = status.hasSavedPassphrase;
+  } catch {
+    webdavSyncSecrets.value = false;
+    webdavHasSavedSecretsPassphrase.value = false;
+  }
+}
+
+async function applyWebDavSyncSecretsPreference() {
+  const passphrase = webdavSecretsPassphrase.value.trim();
+  if (!webdavSyncSecrets.value) {
+    await saveWebdavSyncSecretsPreference(false);
+    return;
+  }
+  await saveWebdavSyncSecretsPreference(true, passphrase || undefined);
+  if (passphrase) {
+    webdavHasSavedSecretsPassphrase.value = true;
+    webdavSecretsPassphrase.value = "";
+  }
+}
+
+async function clearWebDavSyncSecretsPassphrase() {
+  try {
+    await forgetWebdavSyncSecretsPassphrase();
+    webdavHasSavedSecretsPassphrase.value = false;
+    webdavSecretsPassphrase.value = "";
+  } catch (e: any) {
+    setWebDavResult(e?.message || String(e), true);
+  }
+}
+
 async function testWebDav() {
   await runWebDavAction("test", async () => {
     await webdavSyncTest(currentWebDavConfig());
@@ -854,11 +1547,7 @@ async function testWebDav() {
 
 async function uploadWebDavSnapshot() {
   await runWebDavAction("upload", async () => {
-    const summary = await webdavSyncUpload(
-      currentWebDavConfig(),
-      settingsStore.editorSettings,
-      webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined,
-    );
+    const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
     return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
   });
 }
@@ -866,15 +1555,13 @@ async function uploadWebDavSnapshot() {
 async function downloadWebDavSnapshot() {
   if (!window.confirm(t("settings.syncDownloadConfirm"))) return;
   await runWebDavAction("download", async () => {
-    const result = await webdavSyncDownload(
-      currentWebDavConfig(),
-      webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined,
-    );
+    const result = await webdavSyncDownload(currentWebDavConfig(), webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
     if (result.editorSettings && typeof result.editorSettings === "object") {
       settingsStore.updateEditorSettings(result.editorSettings as any);
     }
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
+    await savedSqlStore.initFromStorage();
     const message = t("settings.syncDownloadSuccess", {
       bytes: result.summary.bytes,
       path: result.summary.remotePath,
@@ -889,11 +1576,25 @@ async function downloadWebDavSnapshot() {
   });
 }
 
+const oldPassword = ref("");
+const newPassword = ref("");
+const confirmNewPassword = ref("");
+const passwordMessage = ref("");
+const passwordError = ref(false);
+const changingPassword = ref(false);
+
+async function scrollToInitialSettingsSection() {
+  await nextTick();
+  if (props.initialSection === "tableColumnTemplates") {
+    tableColumnTemplateSectionRef.value?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+}
+
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   async (open) => {
     if (open) {
-      activeSettingsTab.value = props.initialTab || "editor";
+      activeSettingsTab.value = props.initialTab || "appearance";
       passwordMessage.value = "";
       oldPassword.value = "";
       newPassword.value = "";
@@ -901,15 +1602,45 @@ watch(
       await settingsStore.initAiConfig();
       await settingsStore.initDesktopSettings();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
+      editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
+      editDuckDbWorkerMaxProcesses.value = settingsStore.desktopSettings.duckdb_worker_max_processes;
+      if (!duckDbWorkerStartupCaptured.value) {
+        startupDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
+        startupDuckDbWorkerMaxProcesses.value = settingsStore.desktopSettings.duckdb_worker_max_processes;
+        duckDbWorkerStartupCaptured.value = true;
+      }
+      editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
       webdavPassword.value = "";
+      webdavSecretsPassphrase.value = "";
       await refreshWebDavPasswordStatus();
+      await refreshWebDavSyncSecretsStatus();
       syncAiEditState();
       if (!isWeb && activeSettingsTab.value === "mcp") void refreshMcpStatus();
+      if (!isWeb && activeSettingsTab.value === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
+      if (activeSettingsTab.value === "about") void refreshAppSupportInfo();
+      await scrollToInitialSettingsSection();
     }
   },
   { immediate: true },
+);
+
+watch(
+  () => props.initialSection,
+  () => {
+    if (settingsVisible.value) void scrollToInitialSettingsSection();
+  },
+);
+
+watch(
+  () => props.initialTab,
+  (tab) => {
+    if (!settingsVisible.value || !tab) return;
+    activeSettingsTab.value = tab;
+    void scrollToInitialSettingsSection();
+  },
 );
 
 watch([webdavEndpoint, webdavUsername], () => {
@@ -918,21 +1649,32 @@ watch([webdavEndpoint, webdavUsername], () => {
 watch(webdavRememberPassword, (val) => {
   localStorage.setItem("dbx-webdav-remember-password", String(val));
 });
+watch([webdavAutoUploadEnabled, webdavAutoUploadIntervalMinutes], () => {
+  webdavAutoUploadIntervalMinutes.value = normalizedWebDavAutoUploadInterval(webdavAutoUploadIntervalMinutes.value);
+  rememberWebDavFields();
+});
 
 watch(activeSettingsTab, (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
+  if (tab === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
+  if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
+  if (tab === "appearance") {
+    checkLayoutDescTruncation();
+    checkIconThemeDescTruncation();
+  }
 });
 
 onMounted(() => {
   void refreshWebDavPasswordStatus();
+  checkLayoutDescTruncation();
+  checkIconThemeDescTruncation();
+  initTruncationObservers();
 });
 
-const oldPassword = ref("");
-const newPassword = ref("");
-const confirmNewPassword = ref("");
-const passwordMessage = ref("");
-const passwordError = ref(false);
-const changingPassword = ref(false);
+onUnmounted(() => {
+  cleanupTableColumnTemplatePointerDrag();
+  cleanupTruncationObservers();
+});
 
 async function changePassword() {
   if (newPassword.value !== confirmNewPassword.value) {
@@ -943,7 +1685,7 @@ async function changePassword() {
   changingPassword.value = true;
   passwordMessage.value = "";
   try {
-    const res = await fetch("/api/auth/change-password", {
+    const res = await fetch(apiUrl("/api/auth/change-password"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ old_password: oldPassword.value, new_password: newPassword.value }),
@@ -970,17 +1712,22 @@ async function changePassword() {
 }
 
 // ---------- AI Settings ----------
-const aiProviderOptions = Object.values(AI_PROVIDER_PRESETS);
+const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || provider.provider !== "codex-cli"));
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
 const aiEditProvider = ref<AiProvider>(settingsStore.aiConfig.provider);
 const aiEditApiKey = ref(settingsStore.aiConfig.apiKey);
+const aiEditAuthMethod = ref<AiAuthMethod>(settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[settingsStore.aiConfig.provider].authMethod);
 const aiEditEndpoint = ref(settingsStore.aiConfig.endpoint);
 const aiEditModel = ref(settingsStore.aiConfig.model);
 const aiEditApiStyle = ref<AiApiStyle>(settingsStore.aiConfig.apiStyle || "completions");
 const aiEditProxyEnabled = ref(!!settingsStore.aiConfig.proxyEnabled);
 const aiEditProxyUrl = ref(settingsStore.aiConfig.proxyUrl || "");
 const aiEditEnableThinking = ref(settingsStore.aiConfig.enableThinking ?? true);
+const aiEditReasoningLevel = ref<AiReasoningLevel>(settingsStore.aiConfig.reasoningLevel || "default");
+const aiEditContextWindow = ref<number | undefined>(settingsStore.aiConfig.contextWindow);
+const aiEditCodexCliPath = ref(settingsStore.aiConfig.codexCliPath || "");
+const aiEditCodexCliEnvRows = ref<AiEnvRow[]>(aiEnvRowsFromConfig(settingsStore.aiConfig.codexCliEnv));
 
 const aiModelOptions = ref<AiModelInfo[]>([]);
 const aiModelLoading = ref(false);
@@ -989,30 +1736,116 @@ const aiModelLoadedSignature = ref("");
 let aiModelRequestToken = 0;
 
 const aiCompletionsMode = computed(() => aiEditApiStyle.value === "completions");
+const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
+const aiReasoningLevelOptions: Array<{ value: AiReasoningLevel; labelKey: string }> = [
+  { value: "default", labelKey: "ai.reasoningLevelDefault" },
+  { value: "minimal", labelKey: "ai.reasoningLevelMinimal" },
+  { value: "low", labelKey: "ai.reasoningLevelLow" },
+  { value: "medium", labelKey: "ai.reasoningLevelMedium" },
+  { value: "high", labelKey: "ai.reasoningLevelHigh" },
+];
 
 const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
 const aiTestError = ref("");
+const aiTestLatency = ref<number | null>(null);
+const aiTestErrorCopied = ref(false);
+const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
+watch(aiIsCodexCli, (isCodex) => {
+  if (isCodex) void ensureCodexMcpStatus();
+});
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
-const aiSupportsApiStyle = computed(
-  () =>
-    aiEditProvider.value === "openai" ||
-    aiEditProvider.value === "openai-compatible" ||
-    aiEditProvider.value === "custom",
-);
+const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiCredentialLabel = computed(() => (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer" ? "Auth Token" : "API Key"));
+const aiCredentialPlaceholder = computed(() => {
+  if (!aiRequiresApiKey.value) return "Optional";
+  if (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer") return "ANTHROPIC_AUTH_TOKEN";
+  return "";
+});
+const aiEndpointPlaceholder = computed(() => {
+  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+    return "https://api.example.com/v1/messages";
+  }
+  if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
+    return "https://api.example.com/v1";
+  }
+  return "https://api.openai.com/v1";
+});
+const aiEndpointHint = computed(() => {
+  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+    return t("ai.anthropicMessagesHint");
+  }
+  if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
+    return "大多数 OpenAI 兼容 API 需要 /v1 路径前缀";
+  }
+  return "";
+});
+const aiSupportsApiStyle = computed(() => !aiIsCodexCli.value && (aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom"));
+const aiSupportsAnthropicApiStyle = computed(() => aiEditProvider.value === "custom");
+const aiCodexMcpNeedsInstall = computed(() => aiIsCodexCli.value && (!mcpStatus.value || !mcpStatus.value.installed));
+const aiCodexMcpCanInstall = computed(() => {
+  const status = mcpStatus.value;
+  return !mcpInstalling.value && !!status?.npm_available && (!status.installed || status.update_available);
+});
+const aiCodexMcpActionLabel = computed(() => {
+  if (!mcpStatus.value?.installed) return t("settings.mcpInstallButton");
+  if (mcpStatus.value.update_available) return t("settings.mcpUpdateButton");
+  return t("settings.mcpUpToDate");
+});
 const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
-const aiCanListModels = computed(
-  () =>
-    aiModelListSupported.value &&
-    !!aiEditEndpoint.value.trim() &&
-    (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()),
-);
+const aiCanListModels = computed(() => aiModelListSupported.value && (aiIsCodexCli.value || !!aiEditEndpoint.value.trim()) && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
 const aiModelOptionIds = computed(() => aiModelOptions.value.map((model) => model.id));
 const aiModelEmptyText = computed(() => {
   if (aiModelError.value) return aiModelError.value;
   if (!aiModelListSupported.value) return t("ai.modelListUnsupported");
   return t("ai.noModels");
 });
+const aiCodexEnvError = computed(() => codexEnvValidationError());
+const aiCodexPathError = computed(() => {
+  const path = aiEditCodexCliPath.value.trim();
+  const firstToken = path.split(/\s+/)[0] || "";
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(firstToken) ? t("ai.codexCliPathEnvError") : "";
+});
+const aiCodexValidationError = computed(() => (aiIsCodexCli.value ? aiCodexPathError.value || aiCodexEnvError.value : ""));
+
+function aiEnvRowsFromConfig(env: unknown): AiEnvRow[] {
+  return Object.entries(normalizeAiEnv(env)).map(([key, value]) => ({ id: uuid(), key, value }));
+}
+
+function codexEnvFromRows(): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const row of aiEditCodexCliEnvRows.value) {
+    const key = row.key.trim();
+    if (!key || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key.toUpperCase().startsWith("DBX_MCP_")) continue;
+    result[key] = row.value;
+  }
+  return result;
+}
+
+function codexEnvSignature(): string {
+  return JSON.stringify(Object.entries(codexEnvFromRows()).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function savedCodexEnvSignature(): string {
+  return JSON.stringify(Object.entries(normalizeAiEnv(settingsStore.aiConfig.codexCliEnv)).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function codexEnvValidationError(): string {
+  for (const row of aiEditCodexCliEnvRows.value) {
+    const key = row.key.trim();
+    if (key && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return t("ai.codexCliEnvInvalidName", { name: key });
+    if (key.toUpperCase().startsWith("DBX_MCP_")) return t("ai.codexCliEnvReservedName", { name: key });
+  }
+  return "";
+}
+
+function addCodexEnvRow() {
+  aiEditCodexCliEnvRows.value.push({ id: uuid(), key: "", value: "" });
+}
+
+function removeCodexEnvRow(id: string) {
+  aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
+}
 
 function clearAiModelOptions() {
   aiModelRequestToken += 1;
@@ -1027,8 +1860,11 @@ function aiModelConfigSignature() {
     provider: aiEditProvider.value,
     endpoint: aiEditEndpoint.value.trim(),
     apiKey: aiEditApiKey.value.trim(),
+    authMethod: aiEditAuthMethod.value,
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value.trim(),
+    codexCliPath: aiEditCodexCliPath.value.trim(),
+    codexCliEnv: codexEnvSignature(),
   });
 }
 
@@ -1036,12 +1872,17 @@ function currentAiEditConfig() {
   return {
     provider: aiEditProvider.value,
     apiKey: aiEditApiKey.value,
+    authMethod: aiEditAuthMethod.value,
     endpoint: aiEditEndpoint.value,
     model: aiEditModel.value,
     apiStyle: aiEditApiStyle.value,
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
+    reasoningLevel: aiEditReasoningLevel.value,
+    contextWindow: aiEditContextWindow.value || undefined,
+    codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
+    codexCliEnv: aiIsCodexCli.value ? codexEnvFromRows() : {},
   };
 }
 
@@ -1061,13 +1902,21 @@ function displayAiModelName(modelId: string): string {
   return aiModelOptions.value.find((model) => model.id === modelId)?.displayName || modelId;
 }
 
+function aiModelOptionPresentation(modelId: string, label = displayAiModelName(modelId)) {
+  return formatAiModelOption(label, modelId);
+}
+
+function aiModelOptionSecondary(modelId: string, label = displayAiModelName(modelId)) {
+  return aiModelOptionPresentation(modelId, label).secondary;
+}
+
 async function aiRefreshModels() {
   if (aiModelLoading.value) return;
   if (!aiModelListSupported.value) {
     aiModelError.value = t("ai.modelListUnsupported");
     return;
   }
-  if (!aiEditEndpoint.value.trim()) {
+  if (!aiIsCodexCli.value && !aiEditEndpoint.value.trim()) {
     aiModelError.value = t("ai.modelListEndpointRequired");
     return;
   }
@@ -1096,12 +1945,7 @@ async function aiRefreshModels() {
 }
 
 function onAiModelListOpen(open: boolean) {
-  if (
-    open &&
-    aiCanListModels.value &&
-    !aiModelLoading.value &&
-    (!aiModelOptions.value.length || aiModelLoadedSignature.value !== aiModelConfigSignature())
-  ) {
+  if (open && aiCanListModels.value && !aiModelLoading.value && (!aiModelOptions.value.length || aiModelLoadedSignature.value !== aiModelConfigSignature())) {
     void aiRefreshModels();
   }
 }
@@ -1111,58 +1955,91 @@ function aiSelectModel(modelId: string) {
 }
 
 function syncAiEditState() {
-  aiEditProvider.value = settingsStore.aiConfig.provider;
+  const provider = isWeb && settingsStore.aiConfig.provider === "codex-cli" ? "claude" : settingsStore.aiConfig.provider;
+  aiEditProvider.value = provider;
   aiEditApiKey.value = settingsStore.aiConfig.apiKey;
-  aiEditEndpoint.value = settingsStore.aiConfig.endpoint;
-  aiEditModel.value = settingsStore.aiConfig.model;
-  aiEditApiStyle.value = settingsStore.aiConfig.apiStyle || "completions";
+  aiEditAuthMethod.value = settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[provider].authMethod;
+  aiEditEndpoint.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.endpoint : AI_PROVIDER_PRESETS[provider].endpoint;
+  aiEditModel.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.model : AI_PROVIDER_PRESETS[provider].model;
+  aiEditApiStyle.value = provider === settingsStore.aiConfig.provider ? settingsStore.aiConfig.apiStyle || "completions" : AI_PROVIDER_PRESETS[provider].apiStyle;
   aiEditProxyEnabled.value = !!settingsStore.aiConfig.proxyEnabled;
   aiEditProxyUrl.value = settingsStore.aiConfig.proxyUrl || "";
   aiEditEnableThinking.value = settingsStore.aiConfig.enableThinking ?? true;
+  aiEditReasoningLevel.value = settingsStore.aiConfig.reasoningLevel || "default";
+  aiEditContextWindow.value = settingsStore.aiConfig.contextWindow;
+  aiEditCodexCliPath.value = settingsStore.aiConfig.codexCliPath || "";
+  aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(settingsStore.aiConfig.codexCliEnv);
   aiTestResult.value = "";
   aiTestError.value = "";
+  aiTestLatency.value = null;
+  aiTestErrorCopied.value = false;
   clearAiModelOptions();
 }
 
 function aiSelectProvider(provider: AiProvider) {
-  aiEditProvider.value = provider;
-  aiEditEndpoint.value = AI_PROVIDER_PRESETS[provider].endpoint;
-  aiEditModel.value = AI_PROVIDER_PRESETS[provider].model;
-  aiEditApiStyle.value = AI_PROVIDER_PRESETS[provider].apiStyle;
-  if (!AI_PROVIDER_PRESETS[provider].requiresApiKey) aiEditApiKey.value = "";
-  clearAiModelOptions();
+  if (isWeb && provider === "codex-cli") return;
+  if (provider === aiEditProvider.value) return;
+
+  // Save current form edits before switching to prevent data loss.
+  if (aiHasChanges()) {
+    settingsStore.updateAiConfig(currentAiEditConfig());
+  }
+
+  settingsStore.updateAiConfig({ provider });
+  syncAiEditState();
+  if (provider === "codex-cli") void ensureCodexMcpStatus();
+}
+
+function aiSelectApiStyle(style: AiApiStyle) {
+  aiEditApiStyle.value = style;
+  if (aiEditProvider.value === "custom") {
+    aiEditAuthMethod.value = style === "anthropic-messages" ? "api-key" : "bearer";
+  }
 }
 
 function aiHasChanges(): boolean {
   return (
     aiEditProvider.value !== settingsStore.aiConfig.provider ||
     aiEditApiKey.value !== settingsStore.aiConfig.apiKey ||
+    aiEditAuthMethod.value !== (settingsStore.aiConfig.authMethod || AI_PROVIDER_PRESETS[settingsStore.aiConfig.provider].authMethod) ||
     aiEditEndpoint.value !== settingsStore.aiConfig.endpoint ||
     aiEditModel.value !== settingsStore.aiConfig.model ||
     aiEditApiStyle.value !== (settingsStore.aiConfig.apiStyle || "completions") ||
     aiEditProxyEnabled.value !== !!settingsStore.aiConfig.proxyEnabled ||
     aiEditProxyUrl.value !== (settingsStore.aiConfig.proxyUrl || "") ||
-    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true)
+    aiEditEnableThinking.value !== (settingsStore.aiConfig.enableThinking ?? true) ||
+    aiEditReasoningLevel.value !== (settingsStore.aiConfig.reasoningLevel || "default") ||
+    aiEditContextWindow.value !== settingsStore.aiConfig.contextWindow ||
+    aiEditCodexCliPath.value !== (settingsStore.aiConfig.codexCliPath || "") ||
+    codexEnvSignature() !== savedCodexEnvSignature()
   );
 }
 
 function aiApplySettings() {
+  if (aiCodexValidationError.value) {
+    aiTestResult.value = "error";
+    aiTestError.value = aiCodexValidationError.value;
+    return;
+  }
   settingsStore.updateAiConfig(currentAiEditConfig());
 }
 
 async function aiTestConn() {
-  if (
-    (aiRequiresApiKey.value && !aiEditApiKey.value.trim()) ||
-    !aiEditEndpoint.value.trim() ||
-    !aiEditModel.value.trim()
-  )
+  if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || (!aiIsCodexCli.value && !aiEditEndpoint.value.trim()) || (!aiIsCodexCli.value && !aiEditModel.value.trim())) return;
+  if (aiCodexValidationError.value) {
+    aiTestResult.value = "error";
+    aiTestError.value = aiCodexValidationError.value;
     return;
+  }
   aiTesting.value = true;
   aiTestResult.value = "";
   aiTestError.value = "";
+  aiTestLatency.value = null;
+  aiTestErrorCopied.value = false;
   try {
-    await aiTestConnection(currentAiEditConfig());
+    const result = await aiTestConnection(currentAiEditConfig());
     aiTestResult.value = "success";
+    aiTestLatency.value = result.latencyMs ?? null;
   } catch (e: any) {
     aiTestResult.value = "error";
     aiTestError.value = e?.message || String(e);
@@ -1171,9 +2048,29 @@ async function aiTestConn() {
   }
 }
 
+async function copyAiTestError() {
+  if (!aiTestError.value) return;
+  await copyToClipboard(aiTestError.value);
+  aiTestErrorCopied.value = true;
+  window.setTimeout(() => {
+    aiTestErrorCopied.value = false;
+  }, 1500);
+}
+
+async function ensureCodexMcpStatus() {
+  if (isWeb || activeSettingsTab.value !== "ai" || !aiIsCodexCli.value || mcpStatus.value || mcpStatusLoading.value) return;
+  await refreshMcpStatus();
+}
+
 // ---------- CodeMirror preview ----------
 const previewRef = ref<HTMLDivElement>();
 const previewView = shallowRef<EditorViewType | null>(null);
+
+interface PreviewSqlDiagnostic {
+  from: number;
+  to: number;
+  message: string;
+}
 
 function getPreviewCustomThemeColors(): CustomThemeColors | undefined {
   if (editTheme.value !== "custom") return undefined;
@@ -1186,49 +2083,241 @@ const previewSettings = computed<{
   fontSize: number;
   theme: EditorTheme;
   appAppearance: AppThemeAppearance;
+  appPalette: AppThemePalette;
   customColors?: CustomThemeColors;
+  showStatementRunButtons: boolean;
+  showCurrentStatementFrame: boolean;
 }>(() => ({
   fontFamily: editFontFamily.value,
   fontSize: editFontSize.value,
   theme: editTheme.value,
   appAppearance: isDark.value ? "dark" : "light",
+  appPalette: themePalette.value,
   customColors: getPreviewCustomThemeColors(),
+  showStatementRunButtons: editShowStatementRunButtons.value,
+  showCurrentStatementFrame: editShowCurrentStatementFrame.value,
 }));
 
-const previewSql = `SELECT u.id, u.name
+const previewSqlNormal = `SELECT u.id, u.name
 FROM users u
-ORDER BY u.id LIMIT 5;`;
+ORDER BY u.id LIMIT 5;
+
+SELECT o.id, o.total
+FROM orders o
+WHERE o.total > 100;`;
+const previewSqlWithSyntaxError = `SELECT u.id, u.name
+FOM users u
+ORDER BY u.id LIMIT 5;
+
+SELECT o.id, o.total
+FROM orders o
+WHERE o.total > 100;`;
 
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let themeComp: import("@codemirror/state").Compartment | null = null;
+let diagnosticComp: import("@codemirror/state").Compartment | null = null;
+let previewRunGutterComp: import("@codemirror/state").Compartment | null = null;
+let currentStatementFrameComp: import("@codemirror/state").Compartment | null = null;
+let setPreviewDiagnosticsEffect: import("@codemirror/state").StateEffectType<PreviewSqlDiagnostic[]> | null = null;
+let setPreviewRunHighlightEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
 let editorViewModule: typeof import("@codemirror/view") | null = null;
+let previewSqlDiagnostics: PreviewSqlDiagnostic[] = [];
+let previewExecutableCache: ExecutableStatementRangeCache | null = null;
+let previewRunHighlightRange: { from: number; to: number } | null = null;
+let previewRunHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+let buildPreviewRunGutterExtension: () => import("@codemirror/state").Extension = () => [];
+
+function currentPreviewSql(): string {
+  return editSqlSemanticDiagnosticsEnabled.value ? previewSqlWithSyntaxError : previewSqlNormal;
+}
+
+function previewDiagnosticsForSql(sql: string): PreviewSqlDiagnostic[] {
+  if (!editSqlSemanticDiagnosticsEnabled.value) return [];
+  const from = sql.indexOf("FOM");
+  return from >= 0 ? [{ from, to: from + 3, message: "Syntax error: expected FROM" }] : [];
+}
+
+function updatePreviewSqlDiagnostics() {
+  const view = previewView.value;
+  if (!view || !setPreviewDiagnosticsEffect) return;
+  const nextSql = currentPreviewSql();
+  const currentSql = view.state.doc.toString();
+  previewSqlDiagnostics = previewDiagnosticsForSql(nextSql);
+  const effects = setPreviewDiagnosticsEffect.of(previewSqlDiagnostics);
+  if (currentSql === nextSql) {
+    view.dispatch({ effects });
+    return;
+  }
+  previewExecutableCache = null;
+  view.dispatch({
+    changes: { from: 0, to: currentSql.length, insert: nextSql },
+    effects,
+  });
+}
+
+function previewExecutableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
+  previewExecutableCache = executableStatementRangeCacheForDoc(previewExecutableCache, currentView.state.doc, "mysql");
+  return executableStatementRangeStartingAt(previewExecutableCache, lineFrom);
+}
+
+function clearPreviewRunHighlight() {
+  previewRunHighlightRange = null;
+  if (previewView.value && setPreviewRunHighlightEffect) {
+    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(null) });
+  }
+}
+
+function flashPreviewRunHighlight(range: { from: number; to: number }, event: Event) {
+  previewRunHighlightRange = range;
+  if (previewView.value && setPreviewRunHighlightEffect) {
+    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(range) });
+  }
+  if (event.target instanceof Element) {
+    const marker = event.target.closest(".cm-run-statement-marker");
+    marker?.classList.add("cm-run-statement-marker--executed");
+    window.setTimeout(() => marker?.classList.remove("cm-run-statement-marker--executed"), 650);
+  }
+  if (previewRunHighlightTimer) clearTimeout(previewRunHighlightTimer);
+  previewRunHighlightTimer = window.setTimeout(() => {
+    previewRunHighlightTimer = null;
+    clearPreviewRunHighlight();
+  }, 650);
+}
+
+function handlePreviewRunGutterMouseDown(currentView: EditorViewType, line: { from: number; to: number }, event: Event): boolean {
+  if (!(event instanceof MouseEvent) || event.button !== 0) return false;
+  const statementRange = previewExecutableStatementRangeStartingAt(currentView, line.from);
+  if (!statementRange) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  flashPreviewRunHighlight({ from: statementRange.from, to: statementRange.to }, event);
+  currentView.focus();
+  return true;
+}
+
+function buildPreviewCurrentStatementFrameExtension(viewModule: Pick<typeof import("@codemirror/view"), "Decoration" | "EditorView" | "ViewPlugin">, enabled: boolean) {
+  if (!enabled) return [];
+  const { Decoration, EditorView, ViewPlugin } = viewModule;
+  const frameTheme = EditorView.baseTheme({
+    ".cm-db-current-statement-line": {
+      position: "relative",
+    },
+    ".cm-db-current-statement-line::after": {
+      content: '""',
+      position: "absolute",
+      top: "0",
+      bottom: "0",
+      left: "0",
+      boxSizing: "border-box",
+      width: "var(--dbx-current-statement-frame-width, 100%)",
+      borderRight: "1px solid rgb(34 197 94 / 0.75)",
+      borderLeft: "1px solid rgb(34 197 94 / 0.75)",
+      pointerEvents: "none",
+    },
+    ".cm-db-current-statement-line--first::after": {
+      borderTop: "1px solid rgb(34 197 94 / 0.75)",
+    },
+    ".cm-db-current-statement-line--last::after": {
+      borderBottom: "1px solid rgb(34 197 94 / 0.75)",
+    },
+  });
+  const framePlugin = ViewPlugin.fromClass(
+    class {
+      decorations: import("@codemirror/view").DecorationSet;
+      constructor(view: import("@codemirror/view").EditorView) {
+        this.decorations = this.getDeco(view);
+      }
+      update(update: import("@codemirror/view").ViewUpdate) {
+        this.decorations = this.getDeco(update.view);
+      }
+      getDeco(view: import("@codemirror/view").EditorView) {
+        if (view.state.selection.ranges.some((range) => !range.empty)) return Decoration.none;
+        const range = currentExecutableStatementRange(view.state.doc.toString(), view.state.selection.main.head, "mysql");
+        if (!range) return Decoration.none;
+
+        const startLine = view.state.doc.lineAt(range.from);
+        const frameTo = previewCurrentStatementFrameTo(view, range);
+        const endLine = view.state.doc.lineAt(Math.max(range.from, frameTo - 1));
+        let maxWidth = 1;
+        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+          const line = view.state.doc.line(lineNumber);
+          const lineRangeTo = Math.min(line.to, frameTo);
+          maxWidth = Math.max(maxWidth, visualSqlColumns(view.state.doc.sliceString(line.from, lineRangeTo)));
+        }
+
+        const deco: any[] = [];
+        const frameWidth = `calc(${maxWidth}ch + 2ch)`;
+        for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+          const line = view.state.doc.line(lineNumber);
+          const classes = ["cm-db-current-statement-line"];
+          if (lineNumber === startLine.number) classes.push("cm-db-current-statement-line--first");
+          if (lineNumber === endLine.number) classes.push("cm-db-current-statement-line--last");
+          deco.push(Decoration.line({ class: classes.join(" "), attributes: { style: `--dbx-current-statement-frame-width: ${frameWidth};` } }).range(line.from));
+        }
+        return Decoration.set(deco);
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
+
+  return [framePlugin, frameTheme];
+}
+
+function previewCurrentStatementFrameTo(view: import("@codemirror/view").EditorView, range: SqlTextRange): number {
+  const nextChar = range.to < view.state.doc.length ? view.state.doc.sliceString(range.to, range.to + 1) : "";
+  return currentStatementFrameRangeTo(nextChar, range);
+}
 
 watch(
   [previewSettings, editCustomThemes, editActiveCustomThemeId],
   async ([ss]) => {
     if (!previewView.value || !fontThemeComp || !themeComp || !editorViewModule) return;
 
-    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
+    const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
     previewView.value.dispatch({
       effects: [
         themeComp.reconfigure(themeExt),
         fontThemeComp.reconfigure(editorFontTheme(editorViewModule.EditorView, ss.fontSize, ss.fontFamily)),
+        ...(previewRunGutterComp ? [previewRunGutterComp.reconfigure(buildPreviewRunGutterExtension())] : []),
+        ...(currentStatementFrameComp ? [currentStatementFrameComp.reconfigure(buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame))] : []),
       ],
     });
   },
   { deep: true },
 );
 
+watch(editSqlSemanticDiagnosticsEnabled, () => {
+  updatePreviewSqlDiagnostics();
+});
+
 let previewInitialized = false;
+
+function cleanupPreviewEditor() {
+  if (!previewView.value) return;
+  previewView.value.destroy();
+  previewView.value = null;
+  previewInitialized = false;
+  fontThemeComp = null;
+  themeComp = null;
+  diagnosticComp = null;
+  previewRunGutterComp = null;
+  currentStatementFrameComp = null;
+  setPreviewDiagnosticsEffect = null;
+  setPreviewRunHighlightEffect = null;
+  editorViewModule = null;
+  previewSqlDiagnostics = [];
+  previewExecutableCache = null;
+  previewRunHighlightRange = null;
+  buildPreviewRunGutterExtension = () => [];
+  if (previewRunHighlightTimer) {
+    clearTimeout(previewRunHighlightTimer);
+    previewRunHighlightTimer = null;
+  }
+}
 
 watch(activeSettingsTab, (tab) => {
   if (tab !== "editor" && previewView.value) {
-    previewView.value.destroy();
-    previewView.value = null;
-    previewInitialized = false;
-    fontThemeComp = null;
-    themeComp = null;
-    editorViewModule = null;
+    cleanupPreviewEditor();
   }
 });
 
@@ -1237,27 +2326,96 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView }, { EditorState, Compartment }, { sql, MySQL }, { basicSetup }] = await Promise.all([
-    import("@codemirror/view"),
-    import("@codemirror/state"),
-    import("@codemirror/lang-sql"),
-    import("codemirror"),
-  ]);
+  const [{ EditorView, Decoration, ViewPlugin, gutter, GutterMarker }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
-  editorViewModule = { EditorView } as typeof import("@codemirror/view");
+  editorViewModule = { Decoration, EditorView, ViewPlugin } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
   themeComp = new Compartment();
+  diagnosticComp = new Compartment();
+  previewRunGutterComp = new Compartment();
+  currentStatementFrameComp = new Compartment();
+  setPreviewDiagnosticsEffect = StateEffect.define<PreviewSqlDiagnostic[]>();
+  setPreviewRunHighlightEffect = StateEffect.define<{ from: number; to: number } | null>();
+  previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
   const ss = previewSettings.value;
-  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors);
+  const themeExt = await loadEditorTheme(ss.theme, ss.appAppearance, ss.customColors, ss.appPalette);
+  const diagnosticTheme = EditorView.baseTheme({
+    ".cm-settings-preview-sql-error": {
+      textDecoration: "underline wavy var(--destructive)",
+      textUnderlineOffset: "3px",
+    },
+  });
+  const buildPreviewDiagnosticExtension = () => {
+    const diagnosticEffect = setPreviewDiagnosticsEffect;
+    const buildDecorations = () =>
+      Decoration.set(
+        previewSqlDiagnostics.map((diagnostic) =>
+          Decoration.mark({
+            class: "cm-settings-preview-sql-error",
+            attributes: { title: diagnostic.message },
+          }).range(diagnostic.from, diagnostic.to),
+        ),
+        true,
+      );
+
+    const field = StateField.define({
+      create: buildDecorations,
+      update(value, transaction) {
+        const diagnosticsChanged = !!diagnosticEffect && transaction.effects.some((effect) => effect.is(diagnosticEffect));
+        return transaction.docChanged || diagnosticsChanged ? buildDecorations() : value;
+      },
+      provide: (field) => EditorView.decorations.from(field),
+    });
+
+    return [field, diagnosticTheme];
+  };
+
+  class PreviewRunStatementGutterMarker extends GutterMarker {
+    toDOM() {
+      return createRunStatementButtonDom(t("settings.previewStatementRunButton"));
+    }
+  }
+
+  const previewRunMarker = new PreviewRunStatementGutterMarker();
+  buildPreviewRunGutterExtension = () =>
+    editShowStatementRunButtons.value
+      ? gutter({
+          class: "cm-run-statement-gutter",
+          lineMarker(currentView, line) {
+            return previewExecutableStatementRangeStartingAt(currentView, line.from) ? previewRunMarker : null;
+          },
+          domEventHandlers: {
+            mousedown: handlePreviewRunGutterMouseDown,
+          },
+        })
+      : [];
+
+  const buildPreviewRunHighlightExtension = () => {
+    const highlightEffect = setPreviewRunHighlightEffect;
+    const buildDecorations = () => (previewRunHighlightRange ? Decoration.set([Decoration.mark({ class: "cm-settings-preview-run-highlight" }).range(previewRunHighlightRange.from, previewRunHighlightRange.to)], true) : Decoration.none);
+    const field = StateField.define({
+      create: buildDecorations,
+      update(value, transaction) {
+        const highlightChanged = !!highlightEffect && transaction.effects.some((effect) => effect.is(highlightEffect));
+        return transaction.docChanged || highlightChanged ? buildDecorations() : value;
+      },
+      provide: (field) => EditorView.decorations.from(field),
+    });
+    return field;
+  };
 
   const state = EditorState.create({
-    doc: previewSql,
+    doc: currentPreviewSql(),
     extensions: [
       basicSetup,
       sql({ dialect: MySQL }),
       themeComp.of(themeExt),
       fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)),
+      previewRunGutterComp.of(buildPreviewRunGutterExtension()),
+      currentStatementFrameComp.of(buildPreviewCurrentStatementFrameExtension(editorViewModule, ss.showCurrentStatementFrame)),
+      diagnosticComp.of(buildPreviewDiagnosticExtension()),
+      buildPreviewRunHighlightExtension(),
     ],
   });
 
@@ -1265,41 +2423,28 @@ watch(previewRef, async (el) => {
 });
 
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   (open) => {
-    if (!open && previewView.value) {
-      previewView.value.destroy();
-      previewView.value = null;
-      previewInitialized = false;
-      fontThemeComp = null;
-      themeComp = null;
-      editorViewModule = null;
-    }
+    if (!open) cleanupPreviewEditor();
   },
 );
+
+onUnmounted(cleanupPreviewEditor);
 </script>
 
 <template>
-  <Dialog :open="open" @update:open="(v: boolean) => emit('update:open', v)">
-    <DialogContent class="sm:max-w-[860px] h-[min(660px,calc(100vh-80px))] flex flex-col overflow-hidden">
+  <component :is="settingsRootComponent" v-bind="settingsRootProps" :class="settingsRootClass" @update:open="onSettingsRootOpenChange">
+    <component :is="settingsContentComponent" :class="settingsContentClass">
       <DialogHeader>
-        <DialogTitle class="flex items-center gap-2">
+        <component :is="settingsTitleComponent" class="flex items-center gap-2 text-base leading-none font-medium cn-font-heading">
           <Settings class="h-4 w-4" />
           {{ t("settings.title") }}
-        </DialogTitle>
+        </component>
       </DialogHeader>
 
-      <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:flex-row">
-        <nav
-          class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 sm:w-40 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3"
-        >
-          <button
-            v-for="category in settingsCategoryNav"
-            :key="category.value"
-            type="button"
-            :class="settingsCategoryButton(category.value)"
-            @click="activeSettingsTab = category.value"
-          >
+      <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden lg:flex-row">
+        <nav class="settingsCategoryNav flex min-h-0 shrink-0 gap-1 overflow-x-auto border-b pb-3 lg:w-40 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3">
+          <button v-for="category in settingsCategoryNav" :key="category.value" type="button" :class="settingsCategoryButton(category.value)" @click="activeSettingsTab = category.value">
             {{ category.label }}
           </button>
         </nav>
@@ -1318,11 +2463,11 @@ watch(
                     :search-placeholder="t('settings.searchFont')"
                     :empty-text="t('settings.noFontsFound')"
                     :loading-text="t('settings.loadingFonts')"
-                    :loading="systemFontsLoading"
                     allow-custom
                     :display-name="displayFontFamily"
                     :normalize-custom="normalizeCustomFontFamilyInput"
-                    trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
+                    :trigger-class="fontSearchTriggerClass"
+                    :trigger-icon-class="fontSearchTriggerIconClass"
                     content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
                     @update:model-value="onFontFamilyChange"
                     @update:open="(open: boolean) => open && loadSystemFontOptions()"
@@ -1333,7 +2478,7 @@ watch(
                       </span>
                     </template>
                     <template #option-label="{ option, label }">
-                      <span class="truncate" :style="{ fontFamily: option }">{{ label }}</span>
+                      <span class="truncate" :style="fontOptionStyle(option)">{{ label }}</span>
                     </template>
                     <template #custom-option-label="{ value }">
                       <span class="truncate" :style="{ fontFamily: value }">
@@ -1354,26 +2499,14 @@ watch(
                       <SelectContent>
                         <SelectItem v-for="theme in themeSelectOptions" :key="theme.value" :value="theme.value">
                           <div class="flex items-center gap-2">
-                            <span
-                              class="h-3 w-3 rounded-full border"
-                              :class="
-                                theme.dark
-                                  ? 'bg-foreground border-foreground/20'
-                                  : 'bg-muted-foreground/30 border-muted-foreground/40'
-                              "
-                            />
+                            <span class="h-3 w-3 rounded-full border" :class="theme.dark ? 'bg-foreground border-foreground/20' : 'bg-muted-foreground/30 border-muted-foreground/40'" />
                             {{ theme.label }}
                           </div>
                         </SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
-                  <Button
-                    v-if="editTheme === 'custom'"
-                    variant="outline"
-                    class="h-9 w-auto px-4"
-                    @click="showThemeCustomizer = true"
-                  >
+                  <Button v-if="editTheme === 'custom'" variant="outline" class="h-9 w-auto px-4" @click="showThemeCustomizer = true">
                     <Settings class="mr-2 h-4 w-4" />
                     {{ t("settings.customThemeConfigure") }}
                   </Button>
@@ -1386,15 +2519,7 @@ watch(
                   <Label>{{ t("settings.fontSize") }}</Label>
                   <span class="text-xs text-muted-foreground tabular-nums">{{ editFontSize }}px</span>
                 </div>
-                <input
-                  type="range"
-                  min="10"
-                  max="24"
-                  step="1"
-                  :value="editFontSize"
-                  @input="editFontSize = Number(($event.target as HTMLInputElement).value)"
-                  class="w-full accent-primary"
-                />
+                <input type="range" min="10" max="24" step="1" :value="editFontSize" @input="editFontSize = Number(($event.target as HTMLInputElement).value)" class="w-full accent-primary" />
                 <div class="flex items-center gap-2 text-xs text-muted-foreground">
                   <span>10px</span>
                   <span class="flex-1 border-b border-dashed border-muted-foreground/30" />
@@ -1418,23 +2543,93 @@ watch(
                   </Select>
                 </div>
 
-                <div class="flex items-center justify-between gap-4 self-end rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-show-execution-target-picker">{{ t("settings.showExecutionTargetPicker") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.showExecutionTargetPickerDescription") }}</p>
+                  </div>
+                  <Switch id="editor-show-execution-target-picker" v-model="editShowExecutionTargetPicker" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-show-statement-run-buttons">{{ t("settings.showStatementRunButtons") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.showStatementRunButtonsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-show-current-statement-frame">{{ t("settings.showCurrentStatementFrame") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.showCurrentStatementFrameDescription") }}</p>
+                  </div>
+                  <Switch id="editor-show-current-statement-frame" v-model="editShowCurrentStatementFrame" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-word-wrap">{{ t("settings.wordWrap") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.wordWrapDescription") }}</p>
                   </div>
                   <Switch id="editor-word-wrap" v-model="editWordWrap" class="mt-0.5" />
                 </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-vim-mode">{{ t("settings.vimMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.vimModeDescription") }}</p>
+                  </div>
+                  <Switch id="editor-vim-mode" v-model="editVimModeEnabled" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.autoCloseBracketsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-auto-alias-tables">{{ t("settings.autoAliasTables") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.autoAliasTablesDescription") }}</p>
+                  </div>
+                  <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                </div>
               </div>
 
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="space-y-1">
-                  <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.confirmDangerousSqlExecutionDescription") }}
-                  </p>
+              <div class="grid gap-3 md:grid-cols-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-sql-semantic-diagnostics">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.sqlSemanticDiagnosticsEnabledDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-sql-semantic-diagnostics" :model-value="editSqlSemanticDiagnosticsEnabled" class="mt-0.5" @update:model-value="onSqlSemanticDiagnosticsEnabledChange" />
                 </div>
-                <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.confirmDangerousSqlExecutionDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-confirm-unsaved-sql-close">{{ t("settings.confirmUnsavedSqlClose") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.confirmUnsavedSqlCloseDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-confirm-unsaved-sql-close" v-model="editConfirmUnsavedSqlClose" class="mt-0.5" />
+                </div>
               </div>
 
               <Separator />
@@ -1442,64 +2637,219 @@ watch(
               <!-- Live Preview -->
               <div class="space-y-2">
                 <Label>{{ t("settings.preview") }}</Label>
-                <div
-                  class="rounded-md border overflow-auto max-w-full"
-                  :class="
-                    editTheme === 'vscode-light' || editTheme === 'duotone-light' || editTheme === 'xcode'
-                      ? 'border-border'
-                      : 'border-border/50'
-                  "
-                >
+                <div class="rounded-md border overflow-auto max-w-full" :class="editTheme === 'vscode-light' || editTheme === 'duotone-light' || editTheme === 'xcode' ? 'border-border' : 'border-border/50'">
                   <div ref="previewRef" style="min-width: 100%" />
                 </div>
               </div>
             </section>
 
-            <section v-else-if="activeSettingsTab === 'appearance'" class="flex flex-col gap-5 py-2">
-              <div class="space-y-2">
-                <Label>{{ t("settings.languageTitle") }}</Label>
-                <Select :model-value="currentLocale()" @update:model-value="onLocaleChange">
-                  <SelectTrigger class="min-w-36">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
-                      <div class="flex items-center gap-2">
-                        <span
-                          class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none"
+            <section v-else-if="activeSettingsTab === 'formatter'" class="flex flex-col gap-5 py-2">
+              <div class="space-y-3 rounded-md border border-border/70 bg-muted/10 p-3">
+                <div class="text-sm font-medium">{{ t("settings.sqlFormatterEditorShortcuts") }}</div>
+                <div class="overflow-hidden rounded-md border border-border/70 bg-background">
+                  <div v-for="definition in formatterEditorShortcutDefinitions" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                    <div class="min-w-0">
+                      <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
+                    </div>
+                    <div class="min-w-0 space-y-1">
+                      <div class="flex items-center justify-end gap-1.5">
+                        <input
+                          :data-shortcut-input="definition.id"
+                          :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
+                          :style="{
+                            width: editingShortcutId === definition.id ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 3)}ch`,
+                          }"
+                          readonly
+                          :aria-invalid="shortcutConflicts.includes(definition.id)"
+                          :placeholder="t('settings.shortcutPressShortcut')"
+                          class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-background px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                          :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                          @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
+                        />
+                        <Button
+                          v-if="editingShortcutId !== definition.id"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.shortcutPressShortcut')"
+                          @click="focusShortcutInput(definition.id)"
                         >
-                          {{ locale.flag }}
-                        </span>
-                        <span>{{ locale.label }}</span>
+                          <Pencil class="h-4 w-4" />
+                        </Button>
+                        <Button v-else type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelShortcutEdit">
+                          {{ t("settings.cancel") }}
+                        </Button>
+                        <Button
+                          v-if="editingShortcutId !== definition.id"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.reset')"
+                          @click="resetShortcut(definition.id)"
+                        >
+                          <RotateCcw class="h-4 w-4" />
+                        </Button>
+                        <Button
+                          v-if="editingShortcutId !== definition.id && editShortcuts[definition.id]"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.shortcutClear')"
+                          @click="clearShortcut(definition.id)"
+                        >
+                          <X class="h-4 w-4" />
+                        </Button>
+                        <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
                       </div>
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                      <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
+                        {{ t("settings.shortcutConflict") }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <SqlFormatterSettingsPanel v-model="editSqlFormatter" @validity-change="(value: boolean) => (sqlFormatterConfigValid = value)" />
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'appearance'" class="flex flex-col gap-5 py-2">
+              <div class="grid gap-x-1.5 gap-y-4 sm:grid-cols-[minmax(0,127fr)_minmax(0,127fr)_minmax(0,191fr)_minmax(0,130fr)]">
+                <div class="space-y-2 min-w-0">
+                  <div class="flex h-9 items-end">
+                    <Label class="whitespace-normal leading-tight">{{ t("settings.languageTitle") }}</Label>
+                  </div>
+                  <Select :model-value="currentLocale()" @update:model-value="onLocaleChange">
+                    <SelectTrigger class="h-8 w-full gap-0.5 px-0.5">
+                      <SelectValue>
+                        <span v-if="selectedLocaleOption" class="flex min-w-0 items-center gap-0.5">
+                          <span class="inline-flex h-5 shrink-0 items-center justify-center text-sm font-medium leading-none">
+                            {{ selectedLocaleOption.flag }}
+                          </span>
+                          <span class="truncate">{{ selectedLocaleOption.label }}</span>
+                        </span>
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent class="w-[150px]">
+                      <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
+                        <div class="flex items-center gap-1">
+                          <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
+                            {{ locale.flag }}
+                          </span>
+                          <span>{{ locale.label }}</span>
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="space-y-2 min-w-0">
+                  <div class="flex h-9 items-end">
+                    <Label class="whitespace-normal leading-tight">{{ t("settings.colorTheme") }}</Label>
+                  </div>
+                  <Select :model-value="themePalette" @update:model-value="(value) => setThemePalette(value as AppThemePalette)">
+                    <SelectTrigger class="h-8 w-full gap-1">
+                      <SelectValue :placeholder="t('settings.selectColorTheme')">
+                        <span v-if="selectedThemePaletteOption" class="flex min-w-0 items-center gap-1">
+                          <span class="h-3 w-3 shrink-0 rounded-full border border-border shadow-xs" :style="{ background: selectedThemePaletteOption.previewColor }" />
+                          <span class="truncate">{{ selectedThemePaletteOption.label }}</span>
+                        </span>
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="option in appThemePaletteOptions" :key="option.value" :value="option.value">
+                        <div class="flex items-center gap-2">
+                          <span class="h-3 w-3 rounded-full border border-border shadow-xs" :style="{ background: option.previewColor }" />
+                          {{ option.label }}
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="space-y-2 min-w-0">
+                  <div class="flex h-9 items-end gap-1">
+                    <Label class="min-w-0 whitespace-normal leading-tight">{{ t("settings.uiFontFamily") }}</Label>
+                    <HelpTooltip :label="t('settings.uiFontFamily')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      <p>{{ t("settings.uiFontFamilyDescription") }}</p>
+                    </HelpTooltip>
+                  </div>
+                  <SearchableSelect
+                    :model-value="editUiFontFamily"
+                    :options="uiFontOptions"
+                    :placeholder="t('settings.selectFont')"
+                    :search-placeholder="t('settings.searchFont')"
+                    :empty-text="t('settings.noFontsFound')"
+                    :loading-text="t('settings.loadingFonts')"
+                    allow-custom
+                    :display-name="displayUiFontFamily"
+                    :normalize-custom="normalizeCustomFontFamilyInput"
+                    :trigger-class="appearanceFontSearchTriggerClass"
+                    :trigger-icon-class="appearanceFontSearchTriggerIconClass"
+                    content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
+                    @update:model-value="onUiFontFamilyChange"
+                    @update:open="(open: boolean) => open && loadSystemFontOptions()"
+                  >
+                    <template #trigger-label="{ label, loading }">
+                      <span class="truncate" :style="{ fontFamily: editUiFontFamily }">
+                        {{ loading ? t("settings.loadingFonts") : label }}
+                      </span>
+                    </template>
+                    <template #option-label="{ option, label }">
+                      <span class="truncate" :style="fontOptionStyle(option, editUiFontFamily)">{{ label }}</span>
+                    </template>
+                    <template #custom-option-label="{ value }">
+                      <span class="truncate" :style="{ fontFamily: value }">
+                        {{ t("settings.useCustomFont", { font: readableFontFamily(value) }) }}
+                      </span>
+                    </template>
+                  </SearchableSelect>
+                </div>
+
+                <div class="space-y-2 min-w-0">
+                  <div class="flex h-9 items-end gap-1">
+                    <Label class="min-w-0 whitespace-normal leading-tight">{{ t("settings.uiScale") }}</Label>
+                    <HelpTooltip :label="t('settings.uiScale')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      <p>{{ t("settings.uiScaleDescription") }}</p>
+                    </HelpTooltip>
+                  </div>
+                  <Select
+                    :model-value="String(editUiScale)"
+                    @update:model-value="
+                      (value: any) => {
+                        const next = Number(value);
+                        if (Number.isFinite(next)) editUiScale = next;
+                      }
+                    "
+                  >
+                    <SelectTrigger class="h-8 w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)" class="pl-2.5"> {{ Math.round(scale * 100) }}% </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
 
-              <Separator />
-
               <div class="space-y-2">
-                <Label>{{ t("settings.uiScale") }}</Label>
-                <Select
-                  :model-value="String(editUiScale)"
-                  @update:model-value="
-                    (value: any) => {
-                      const next = Number(value);
-                      if (Number.isFinite(next)) editUiScale = next;
-                    }
-                  "
-                >
-                  <SelectTrigger class="w-40">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)">
-                      {{ Math.round(scale * 100) }}%
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p class="text-xs text-muted-foreground">{{ t("settings.uiScaleDescription") }}</p>
+                <Label>{{ t("settings.theme") }}</Label>
+                <div class="flex flex-wrap gap-2">
+                  <Button
+                    v-for="option in appThemeModeOptions"
+                    :key="option.value"
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    class="h-8 gap-1.5 rounded-[6px] px-3"
+                    :class="themeMode === option.value ? 'border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                    @click="setThemeMode(option.value)"
+                  >
+                    <component :is="option.icon" class="h-3.5 w-3.5" />
+                    {{ option.label }}
+                  </Button>
+                </div>
               </div>
 
               <Separator />
@@ -1507,78 +2857,96 @@ watch(
               <div class="space-y-2">
                 <Label>{{ t("settings.appLayout") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editAppLayout === 'separated' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setAppLayout('separated')"
-                  >
-                    <div class="text-left">
-                      <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
-                      <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutSeparatedDescription") }}</div>
-                    </div>
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editAppLayout === 'separated' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('separated')">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <div class="w-full min-w-0 text-left">
+                            <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
+                            <div :ref="(el) => setLayoutDescRef('separated', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutSeparatedDescription") }}</div>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent v-if="layoutDescTruncated.separated.value" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("settings.appLayoutSeparatedDescription") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editAppLayout === 'classic' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setAppLayout('classic')"
-                  >
-                    <div class="text-left">
-                      <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
-                      <div class="text-xs text-muted-foreground">{{ t("settings.appLayoutClassicDescription") }}</div>
-                    </div>
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editAppLayout === 'classic' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('classic')">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <div class="w-full min-w-0 text-left">
+                            <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
+                            <div :ref="(el) => setLayoutDescRef('classic', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutClassicDescription") }}</div>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent v-if="layoutDescTruncated.classic.value" class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("settings.appLayoutClassicDescription") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </Button>
                 </div>
               </div>
 
-              <div v-if="!isWeb" class="space-y-2">
+              <!-- <div v-if="!isWeb" class="space-y-2"> -->
+              <div class="space-y-2">
                 <Label>{{ t("settings.iconTheme") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setIconTheme('default')"
-                  >
-                    <div class="flex items-center gap-3 text-left">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('default')">
+                    <div class="flex items-center gap-3 text-left w-full min-w-0">
                       <img src="/logo.png" alt="DBX" class="h-8 w-8 rounded-md" />
-                      <div>
-                        <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
-                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeDefaultDescription") }}</div>
-                      </div>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <div class="w-full min-w-0 text-left">
+                              <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
+                              <div :ref="(el) => setIconThemeDescRef('default', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeDefaultDescription") }}</div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent v-if="iconThemeDescTruncated.default.value" class="max-w-[320px] text-xs leading-relaxed">
+                            {{ t("settings.iconThemeDefaultDescription") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </div>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setIconTheme('black')"
-                  >
-                    <div class="flex items-center gap-3 text-left">
-                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert" />
-                      <div>
-                        <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
-                        <div class="text-xs text-muted-foreground">{{ t("settings.iconThemeBlackDescription") }}</div>
-                      </div>
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('black')">
+                    <div class="flex items-center gap-3 text-left w-full min-w-0">
+                      <img src="/logo-black.png" alt="DBX" class="h-8 w-8 dark:invert shrink-0" />
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <div class="w-full min-w-0 text-left">
+                              <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
+                              <div :ref="(el) => setIconThemeDescRef('black', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeBlackDescription") }}</div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent v-if="iconThemeDescTruncated.black.value" class="max-w-[320px] text-xs leading-relaxed">
+                            {{ t("settings.iconThemeBlackDescription") }}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </div>
                   </Button>
                 </div>
               </div>
 
-              <div
-                v-if="!isWeb"
-                class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2"
-              >
+              <div v-if="!isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="show-tray-icon">{{ t("settings.showTrayIcon") }}</Label>
                   <p class="text-xs text-muted-foreground">{{ t("settings.showTrayIconDescription") }}</p>
                 </div>
                 <Switch id="show-tray-icon" v-model="editShowTrayIcon" />
+              </div>
+
+              <div v-if="!isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="quit-on-close">{{ t("settings.quitOnClose") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.quitOnCloseDescription") }}</p>
+                </div>
+                <Switch id="quit-on-close" v-model="editQuitOnClose" />
               </div>
 
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -1651,6 +3019,81 @@ watch(
                   </div>
                   <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
                 </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-quick-entry">
+                      {{ t("settings.dataGridQuickEntry") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridQuickEntryDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-quick-entry" v-model="editDataGridQuickEntry" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="infinite-scroll">
+                      {{ t("settings.infiniteScroll") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.infiniteScrollDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="infinite-scroll" v-model="editInfiniteScroll" />
+                </div>
+                <div v-if="editInfiniteScroll" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="infinite-scroll-max-rows">
+                      {{ t("settings.infiniteScrollMaxRows") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.infiniteScrollMaxRowsDescription") }}
+                    </p>
+                  </div>
+                  <Input
+                    id="infinite-scroll-max-rows"
+                    v-model="editInfiniteScrollMaxRows"
+                    type="number"
+                    inputmode="numeric"
+                    :min="1000"
+                    :max="50000"
+                    class="h-7 w-24 px-2 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                  />
+                </div>
+              </div>
+
+              <Separator />
+
+              <div class="space-y-2">
+                <div class="flex items-center gap-2">
+                  <Label>{{ t("settings.toolbarTitle") }}</Label>
+                  <HelpTooltip :label="t('settings.toolbarTitle')" content-class="max-w-64">
+                    <p>{{ t("settings.toolbarHiddenHint") }}</p>
+                  </HelpTooltip>
+                </div>
+                <div class="grid grid-cols-3 gap-2 mt-2">
+                  <div
+                    v-for="item in [
+                      { key: 'dataTransfer', label: t('transfer.dataTransfer') },
+                      { key: 'driverManager', label: t('toolbar.driverManager') },
+                      { key: 'sqlFile', label: t('sqlFile.title') },
+                      { key: 'schemaDiff', label: t('diff.title') },
+                      { key: 'dataCompare', label: t('dataCompare.title') },
+                      { key: 'checkUpdates', label: t('updates.check') },
+                      { key: 'sqlLibrary', label: t('sqlLibrary.title') },
+                      { key: 'sqlFileTree', label: t('sqlFileTree.title') },
+                      { key: 'history', label: t('history.title') },
+                      { key: 'ai', label: 'AI' },
+                      { key: 'theme', label: t('toolbar.theme') },
+                      { key: 'github', label: 'GitHub' },
+                    ]"
+                    :key="item.key"
+                    class="flex items-center gap-2"
+                  >
+                    <Switch :id="`toolbar-${item.key}`" :model-value="(editToolbarItems as any)[item.key]" @update:model-value="(v: boolean) => ((editToolbarItems as any)[item.key] = v)" />
+                    <Label :for="`toolbar-${item.key}`" class="text-sm cursor-pointer">{{ item.label }}</Label>
+                  </div>
+                </div>
               </div>
             </section>
 
@@ -1658,13 +3101,7 @@ watch(
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarActivation") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editSidebarActivation === 'single' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setSidebarActivation('single')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarActivation('single')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.sidebarActivationSingle") }}</div>
                       <div class="text-xs text-muted-foreground">
@@ -1672,13 +3109,7 @@ watch(
                       </div>
                     </div>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editSidebarActivation === 'double' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setSidebarActivation('double')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarActivation('double')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.sidebarActivationDouble") }}</div>
                       <div class="text-xs text-muted-foreground">
@@ -1691,82 +3122,43 @@ watch(
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="reuse-data-tab">{{ t("settings.reuseDataTab") }}</Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.reuseDataTabDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.reuseDataTab')">
+                    {{ t("settings.reuseDataTabDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Switch id="reuse-data-tab" v-model="editReuseDataTab" />
               </div>
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarObjectDisplay") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editSidebarObjectDisplay === 'grouped' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setSidebarObjectDisplay('grouped')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'grouped' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarObjectDisplay('grouped')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
                         <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplayGrouped") }}</div>
                         <Tooltip :open="sidebarObjectDisplayHelp === 'grouped'">
                           <TooltipTrigger as-child>
-                            <span
-                              class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground"
-                              @click.stop
-                              @pointerdown.stop
-                              @mouseenter="sidebarObjectDisplayHelp = 'grouped'"
-                              @mouseleave="sidebarObjectDisplayHelp = null"
-                            >
+                            <span class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground" @click.stop @pointerdown.stop @mouseenter="sidebarObjectDisplayHelp = 'grouped'" @mouseleave="sidebarObjectDisplayHelp = null">
                               <CircleHelp class="h-3.5 w-3.5" />
                             </span>
                           </TooltipTrigger>
-                          <TooltipContent
-                            class="max-w-[320px] text-xs leading-relaxed"
-                            side="top"
-                            align="center"
-                            :side-offset="8"
-                          >
+                          <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="center" :side-offset="8">
                             {{ t("settings.sidebarObjectDisplayGroupedDescription") }}
                           </TooltipContent>
                         </Tooltip>
                       </div>
                     </div>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto justify-start border p-3"
-                    :class="editSidebarObjectDisplay === 'simple' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''"
-                    @click="setSidebarObjectDisplay('simple')"
-                  >
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'simple' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarObjectDisplay('simple')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
                         <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplaySimple") }}</div>
                         <Tooltip :open="sidebarObjectDisplayHelp === 'simple'">
                           <TooltipTrigger as-child>
-                            <span
-                              class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground"
-                              @click.stop
-                              @pointerdown.stop
-                              @mouseenter="sidebarObjectDisplayHelp = 'simple'"
-                              @mouseleave="sidebarObjectDisplayHelp = null"
-                            >
+                            <span class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground" @click.stop @pointerdown.stop @mouseenter="sidebarObjectDisplayHelp = 'simple'" @mouseleave="sidebarObjectDisplayHelp = null">
                               <CircleHelp class="h-3.5 w-3.5" />
                             </span>
                           </TooltipTrigger>
-                          <TooltipContent
-                            class="max-w-[320px] text-xs leading-relaxed"
-                            side="top"
-                            align="center"
-                            :side-offset="8"
-                          >
+                          <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="center" :side-offset="8">
                             {{ t("settings.sidebarObjectDisplaySimpleDescription") }}
                           </TooltipContent>
                         </Tooltip>
@@ -1777,34 +3169,51 @@ watch(
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
+                  <Label for="sidebar-table-search-enabled">{{ t("settings.sidebarTableSearchEnabled") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarTableSearchEnabled')">
+                    {{ t("settings.sidebarTableSearchEnabledDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-table-search-enabled" v-model="editSidebarTableSearchEnabled" />
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
                   <Label for="auto-select-active-sidebar-node">{{ t("settings.autoSelectActiveSidebarNode") }}</Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.autoSelectActiveSidebarNodeDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.autoSelectActiveSidebarNode')">
+                    {{ t("settings.autoSelectActiveSidebarNodeDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Switch id="auto-select-active-sidebar-node" v-model="editAutoSelectActiveSidebarNode" />
               </div>
               <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
-                  <Label for="disconnect-tab-handling-mode">{{ t("settings.disconnectTabHandlingMode") }}</Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.disconnectTabHandlingModeDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <Label for="open-tabs-restore-mode">{{ t("settings.openTabsRestoreMode") }}</Label>
+                  <HelpTooltip :label="t('settings.openTabsRestoreMode')">
+                    {{ t("settings.openTabsRestoreModeDescription") }}
+                  </HelpTooltip>
                 </div>
-                <Select
-                  :model-value="editDisconnectTabHandlingMode"
-                  @update:model-value="onDisconnectTabHandlingModeChange"
-                >
+                <Select :model-value="editOpenTabsRestoreMode" @update:model-value="(value) => (editOpenTabsRestoreMode = value as OpenTabsRestoreMode)">
+                  <SelectTrigger id="open-tabs-restore-mode" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">{{ t("settings.openTabsRestoreModeAll") }}</SelectItem>
+                    <SelectItem value="pinned">{{ t("settings.openTabsRestoreModePinned") }}</SelectItem>
+                    <SelectItem value="none">{{ t("settings.openTabsRestoreModeNone") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">
+                  {{ t("settings.openTabsRestoreModeHint") }}
+                </p>
+              </div>
+              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="disconnect-tab-handling-mode">{{ t("settings.disconnectTabHandlingMode") }}</Label>
+                  <HelpTooltip :label="t('settings.disconnectTabHandlingMode')">
+                    {{ t("settings.disconnectTabHandlingModeDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Select :model-value="editDisconnectTabHandlingMode" @update:model-value="onDisconnectTabHandlingModeChange">
                   <SelectTrigger id="disconnect-tab-handling-mode" class="w-full">
                     <SelectValue />
                   </SelectTrigger>
@@ -1825,14 +3234,9 @@ watch(
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-hide-table-comments">{{ t("settings.sidebarHideTableComments") }}</Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.sidebarHideTableCommentsDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.sidebarHideTableComments')">
+                    {{ t("settings.sidebarHideTableCommentsDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Switch id="sidebar-hide-table-comments" v-model="editSidebarHideTableComments" />
               </div>
@@ -1841,14 +3245,9 @@ watch(
                   <Label for="sidebar-allow-horizontal-scroll">
                     {{ t("settings.sidebarAllowHorizontalScroll") }}
                   </Label>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                      {{ t("settings.sidebarAllowHorizontalScrollDescription") }}
-                    </TooltipContent>
-                  </Tooltip>
+                  <HelpTooltip :label="t('settings.sidebarAllowHorizontalScroll')">
+                    {{ t("settings.sidebarAllowHorizontalScrollDescription") }}
+                  </HelpTooltip>
                 </div>
                 <Switch id="sidebar-allow-horizontal-scroll" v-model="editSidebarAllowHorizontalScroll" />
               </div>
@@ -1864,24 +3263,90 @@ watch(
                   {{ t("settings.sidebarHiddenTablePrefixesDescription") }}
                 </p>
               </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-table-page-size">{{ t("settings.sidebarTablePageSize") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.sidebarTablePageSizeDescription") }}
+                  </p>
+                </div>
+                <Input
+                  id="sidebar-table-page-size"
+                  type="number"
+                  class="w-24 text-right"
+                  :min="100"
+                  :max="10000"
+                  :step="100"
+                  :model-value="editSidebarTablePageSize"
+                  @update:model-value="
+                    (value: string | number) => {
+                      const n = typeof value === 'string' ? parseInt(value) : value;
+                      if (!isNaN(n)) editSidebarTablePageSize = n;
+                    }
+                  "
+                />
+              </div>
             </section>
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" class="flex flex-col gap-5 py-2">
+              <template v-if="!isWeb">
+                <div class="space-y-3">
+                  <div class="text-sm font-medium text-muted-foreground">DuckDB</div>
+                  <div class="space-y-3 rounded-md border bg-muted/20 px-3 py-2">
+                    <div class="flex items-start justify-between gap-4">
+                      <div class="space-y-1">
+                        <Label for="duckdb-worker-process-isolation">
+                          {{ t("settings.duckDbWorkerProcessIsolation") }}
+                        </Label>
+                        <p class="text-xs text-muted-foreground">
+                          {{ t("settings.duckDbWorkerProcessIsolationDescription") }}
+                        </p>
+                      </div>
+                      <Switch id="duckdb-worker-process-isolation" v-model="editDuckDbWorkerProcessIsolation" class="mt-0.5" />
+                    </div>
+                    <div class="flex items-start justify-between gap-4">
+                      <div class="space-y-1">
+                        <Label for="duckdb-worker-max-processes">
+                          {{ t("settings.duckDbWorkerMaxProcesses") }}
+                        </Label>
+                        <p class="text-xs text-muted-foreground">
+                          {{ t("settings.duckDbWorkerMaxProcessesDescription") }}
+                        </p>
+                      </div>
+                      <Input
+                        id="duckdb-worker-max-processes"
+                        v-model.number="editDuckDbWorkerMaxProcesses"
+                        type="number"
+                        class="h-8 w-20 text-right [&::-webkit-inner-spin-button]:appearance-none"
+                        :min="DUCKDB_WORKER_MAX_PROCESSES_MIN"
+                        :max="DUCKDB_WORKER_MAX_PROCESSES_MAX"
+                        :step="1"
+                        @blur="editDuckDbWorkerMaxProcesses = normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses)"
+                      />
+                    </div>
+                    <div v-if="duckDbWorkerSettingsRequireRestart" class="flex flex-wrap items-center gap-2 border-t pt-2">
+                      <p class="text-xs font-medium text-amber-600 dark:text-amber-400">
+                        {{ t("settings.duckDbWorkerProcessIsolationRestartRequired") }}
+                      </p>
+                      <Button type="button" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" :disabled="duckDbRestarting || hasApplyBlocker" @click="restartDbxForDuckDbIsolation">
+                        <Loader2 v-if="duckDbRestarting" class="size-3.5 animate-spin" />
+                        <RefreshCw v-else class="size-3.5" />
+                        {{ t("settings.restartDbx") }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                <Separator />
+              </template>
+
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">{{ t("settings.exportSection") }}</div>
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
                   <div class="flex items-center gap-3">
-                    <Input
-                      type="number"
-                      list="export-batch-sizes"
-                      min="100"
-                      max="100000"
-                      step="100"
-                      v-model.number="editExportBatchSize"
-                      class="h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none"
-                    />
+                    <Input type="number" list="export-batch-sizes" min="100" max="100000" step="100" v-model.number="editExportBatchSize" class="h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none" />
                     <datalist id="export-batch-sizes">
                       <option value="500" />
                       <option value="1000" />
@@ -1892,43 +3357,139 @@ watch(
                     <span class="text-xs text-muted-foreground">{{ t("settings.exportBatchSizeDescription") }}</span>
                   </div>
                 </div>
+                <div class="flex items-start justify-between gap-3">
+                  <div class="space-y-0.5">
+                    <Label for="export-row-limit-enabled">{{ t("settings.exportRowLimitEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.exportRowLimitEnabledDescription") }}</p>
+                  </div>
+                  <Switch id="export-row-limit-enabled" v-model="editExportRowLimitEnabled" class="mt-0.5" />
+                </div>
+                <div class="space-y-2">
+                  <Label for="export-row-limit">{{ t("settings.exportRowLimit") }}</Label>
+                  <div class="flex items-center gap-3">
+                    <Input id="export-row-limit" type="number" min="100" max="2147483647" step="100" v-model.number="editExportRowLimit" :disabled="!editExportRowLimitEnabled" class="h-9 w-32 [&::-webkit-inner-spin-button]:appearance-none" />
+                    <span class="text-xs text-muted-foreground">
+                      {{ editExportRowLimitEnabled ? t("settings.exportRowLimitDescription") : t("settings.exportRowLimitUnlimited") }}
+                    </span>
+                  </div>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <div class="space-y-0.5">
+                    <Label for="query-export-keyset-enabled">{{ t("settings.queryExportKeysetOptimizationEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.queryExportKeysetOptimizationEnabledDescription") }}</p>
+                  </div>
+                  <Switch id="query-export-keyset-enabled" v-model="editQueryExportKeysetOptimizationEnabled" class="mt-0.5" />
+                </div>
               </div>
-            </section>
 
-            <section v-else-if="activeSettingsTab === 'redis'" class="flex flex-col gap-5 py-2">
-              <div class="space-y-2">
-                <Label>{{ t("settings.redisScanPageSize") }}</Label>
-                <Select :model-value="String(editRedisScanPageSize)" @update:model-value="onRedisScanPageSizeChange">
-                  <SelectTrigger>
-                    <SelectValue :placeholder="t('settings.redisScanPageSize')" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="size in redisScanPageSizeOptions" :key="size" :value="String(size)">
-                      {{ t("settings.redisScanPageSizeOption", { count: size }) }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p class="text-xs text-muted-foreground">{{ t("settings.redisScanPageSizeDescription") }}</p>
+              <Separator />
+
+              <div class="space-y-3">
+                <div class="text-sm font-medium text-muted-foreground">{{ t("settings.tableStructureSection") }}</div>
+                <div ref="tableColumnTemplateSectionRef" class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="space-y-1">
+                      <Label>{{ t("settings.tableColumnTemplateFields") }}</Label>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.tableColumnTemplateFieldsDescription") }}</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <Select v-model="editTableColumnTemplateDatabaseType">
+                        <SelectTrigger class="h-8 w-44 px-2 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent class="max-h-72">
+                          <SelectItem v-for="dbType in TABLE_COLUMN_TEMPLATE_DATABASE_TYPES" :key="dbType" :value="dbType">
+                            {{ dbType }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button type="button" size="sm" variant="outline" @click="addTableColumnTemplateRow">
+                        {{ t("settings.tableColumnTemplateAdd") }}
+                      </Button>
+                    </div>
+                  </div>
+                  <div class="overflow-x-auto rounded-md border bg-background">
+                    <table class="w-full min-w-[900px] border-separate border-spacing-0 text-xs">
+                      <thead class="bg-muted/50 text-muted-foreground">
+                        <tr>
+                          <th class="w-8 border-b px-2 py-1.5" />
+                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateColumn") }}</th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateType") }}</th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateLength") }}</th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateDefault") }}</th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateRequired") }}</th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateComment") }}</th>
+                          <th class="w-10 border-b px-2 py-1.5" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="row in visibleTableColumnTemplateRows" :key="row.id" :data-table-column-template-row-id="row.id" :class="draggedTableColumnTemplateRowId === row.id ? 'opacity-60' : ''">
+                          <td class="border-b px-2 py-1.5 align-middle">
+                            <button
+                              type="button"
+                              class="flex h-7 w-6 cursor-grab touch-none items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground active:cursor-grabbing"
+                              :aria-label="t('settings.tableColumnTemplateDragHandle')"
+                              @pointerdown="startTableColumnTemplateRowDrag(row.id, $event)"
+                            >
+                              <GripVertical class="h-3.5 w-3.5" />
+                            </button>
+                          </td>
+                          <td class="border-b px-2 py-1.5">
+                            <Input v-model="row.name" class="h-7 px-2 text-xs" />
+                          </td>
+                          <td class="border-b px-2 py-1.5">
+                            <SearchableSelect
+                              :model-value="tableColumnTemplateBaseTypeForSelectedDatabase(row)"
+                              :options="tableColumnTemplateTypeOptions(editTableColumnTemplateDatabaseType)"
+                              :placeholder="t('settings.tableColumnTemplateNoPresetType')"
+                              :search-placeholder="t('structureEditor.typePlaceholder')"
+                              :empty-text="t('structureEditor.noMatchingType')"
+                              :loading-text="t('common.loading')"
+                              :allow-custom="true"
+                              :trigger-class="['h-7 w-full px-2 font-mono text-xs']"
+                              @update:model-value="setTableColumnTemplateBaseTypeForSelectedDatabase(row, $event)"
+                            />
+                          </td>
+                          <td class="border-b px-2 py-1.5">
+                            <Input :model-value="tableColumnTemplateLengthForSelectedDatabase(row)" class="h-7 w-28 px-2 font-mono text-xs" :disabled="isTableColumnTemplateLengthDisabled(row)" @update:model-value="setTableColumnTemplateLengthForSelectedDatabase(row, String($event))" />
+                          </td>
+                          <td class="border-b px-2 py-1.5">
+                            <Input v-model="row.defaultValue" class="h-7 px-2 font-mono text-xs" />
+                          </td>
+                          <td class="border-b px-2 py-1.5">
+                            <Switch v-model="row.required" />
+                          </td>
+                          <td class="border-b px-2 py-1.5">
+                            <Input v-model="row.comment" class="h-7 px-2 text-xs" />
+                          </td>
+                          <td class="border-b px-2 py-1.5 text-right">
+                            <Button type="button" variant="ghost" size="icon" class="h-7 w-7" @click="removeTableColumnTemplateRow(row.id)">
+                              <X class="h-3.5 w-3.5" />
+                            </Button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </section>
 
             <section v-else-if="activeSettingsTab === 'shortcuts'" class="flex flex-col gap-2 py-2">
+              <div class="relative">
+                <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
+              </div>
               <div class="overflow-hidden rounded-md border border-border/70 bg-background">
-                <div
-                  v-for="definition in SHORTCUT_DEFINITIONS"
-                  :key="definition.id"
-                  class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
-                >
+                <div v-if="filteredShortcutDefinitions.length === 0" class="px-3 py-8 text-center text-sm text-muted-foreground">
+                  {{ t("settings.shortcutSearchNoResults") }}
+                </div>
+                <div v-for="definition in filteredShortcutDefinitions" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                   <div class="min-w-0">
                     <div class="flex min-w-0 items-center gap-2">
                       <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
-                      <Badge
-                        variant="outline"
-                        class="h-5 shrink-0 rounded-md border-border/60 px-1.5 text-[11px] font-normal text-muted-foreground"
-                      >
-                        {{
-                          t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`)
-                        }}
+                      <Badge variant="outline" class="h-5 shrink-0 rounded-md border-border/60 px-1.5 text-[11px] font-normal text-muted-foreground">
+                        {{ t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`) }}
                       </Badge>
                     </div>
                   </div>
@@ -1936,24 +3497,15 @@ watch(
                     <div class="flex items-center justify-end gap-1.5">
                       <input
                         :data-shortcut-input="definition.id"
-                        :value="
-                          editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])
-                        "
+                        :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
                         :style="{
-                          width:
-                            editingShortcutId === definition.id
-                              ? shortcutPressShortcutInputWidth
-                              : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 2)}ch`,
+                          width: editingShortcutId === definition.id ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 3)}ch`,
                         }"
                         readonly
                         :aria-invalid="shortcutConflicts.includes(definition.id)"
                         :placeholder="t('settings.shortcutPressShortcut')"
-                        class="h-7 w-auto min-w-12 max-w-32 shrink-0 cursor-default rounded-full border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                        :class="
-                          editingShortcutId === definition.id
-                            ? 'max-w-44 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35'
-                            : ''
-                        "
+                        class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
+                        :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
                         @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
                       />
                       <Button
@@ -1967,14 +3519,7 @@ watch(
                       >
                         <Pencil class="h-4 w-4" />
                       </Button>
-                      <Button
-                        v-else
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground"
-                        @click="cancelShortcutEdit"
-                      >
+                      <Button v-else type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelShortcutEdit">
                         {{ t("settings.cancel") }}
                       </Button>
                       <Button
@@ -1988,6 +3533,18 @@ watch(
                       >
                         <RotateCcw class="h-4 w-4" />
                       </Button>
+                      <Button
+                        v-if="editingShortcutId !== definition.id && editShortcuts[definition.id]"
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        class="h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                        :aria-label="t('settings.shortcutClear')"
+                        @click="clearShortcut(definition.id)"
+                      >
+                        <X class="h-4 w-4" />
+                      </Button>
+                      <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
                     </div>
                     <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
                       {{ t("settings.shortcutConflict") }}
@@ -2002,12 +3559,13 @@ watch(
               <div class="flex items-center justify-between">
                 <p class="text-sm text-muted-foreground">{{ t("settings.snippetsDescription") }}</p>
                 <Button variant="outline" size="sm" @click="openAddSnippetDialog">
+                  <Plus class="mr-2 h-4 w-4" />
                   {{ t("settings.snippetsAdd") }}
                 </Button>
               </div>
 
-              <div class="rounded-md border">
-                <table class="w-full text-sm">
+              <div class="overflow-x-auto rounded-md border">
+                <table class="w-full min-w-[720px] text-sm">
                   <thead>
                     <tr class="border-b bg-muted/50">
                       <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
@@ -2017,25 +3575,29 @@ watch(
                         {{ t("settings.snippetsPrefix") }}
                       </th>
                       <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
+                        {{ t("settings.snippetsStatus") }}
+                      </th>
+                      <th class="px-3 py-2 text-left font-medium whitespace-nowrap">
                         {{ t("settings.snippetsBody") }}
                       </th>
                       <th class="px-3 py-2 w-20"></th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr
-                      v-for="snippet in editSnippets"
-                      :key="snippet.id"
-                      class="border-b last:border-b-0 hover:bg-muted/30"
-                    >
+                    <tr v-for="snippet in editSnippets" :key="snippet.id" class="border-b last:border-b-0 hover:bg-muted/30" :class="snippet.enabled === false ? 'text-muted-foreground' : ''">
                       <td class="px-3 py-2">{{ snippet.label }}</td>
                       <td class="px-3 py-2">
-                        <Badge
-                          variant="outline"
-                          class="h-5 rounded-md px-1.5 text-[11px] font-mono text-muted-foreground"
-                        >
+                        <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px] font-mono text-muted-foreground">
                           {{ snippet.prefix }}
                         </Badge>
+                      </td>
+                      <td class="px-3 py-2">
+                        <div class="flex items-center gap-2">
+                          <Switch :id="`snippet-enabled-${snippet.id}`" :model-value="snippet.enabled !== false" size="sm" :aria-label="t('settings.snippetsToggle')" @update:model-value="(value: boolean) => setSnippetEnabled(snippet.id, value)" />
+                          <Label :for="`snippet-enabled-${snippet.id}`" class="text-xs font-normal text-muted-foreground">
+                            {{ snippet.enabled === false ? t("settings.snippetsDisabled") : t("settings.snippetsEnabled") }}
+                          </Label>
+                        </div>
                       </td>
                       <td class="px-3 py-2 font-mono text-xs text-muted-foreground max-w-[300px] truncate">
                         {{ snippet.body }}
@@ -2068,12 +3630,7 @@ watch(
               <div class="grid gap-4 md:grid-cols-2">
                 <div class="space-y-2 md:col-span-2">
                   <Label for="webdav-endpoint">{{ t("settings.syncEndpoint") }}</Label>
-                  <Input
-                    id="webdav-endpoint"
-                    v-model="webdavEndpoint"
-                    autocomplete="off"
-                    placeholder="https://example.com/remote.php/dav/files/user/"
-                  />
+                  <Input id="webdav-endpoint" v-model="webdavEndpoint" autocomplete="off" placeholder="https://example.com/remote.php/dav/files/user/" />
                 </div>
                 <div class="space-y-2">
                   <Label for="webdav-username">{{ t("settings.syncUsername") }}</Label>
@@ -2082,19 +3639,11 @@ watch(
                 <div class="space-y-2">
                   <Label for="webdav-password">{{ t("settings.syncPassword") }}</Label>
                   <div class="relative">
-                    <Input
-                      id="webdav-password"
-                      v-model="webdavPassword"
-                      type="password"
-                      :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')"
-                      :disabled="webdavHasSavedPassword"
-                      autocomplete="current-password"
-                    />
-                    <Button
+                    <PasswordInput id="webdav-password" v-model="webdavPassword" :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')" :disabled="webdavHasSavedPassword" :show-toggle="!webdavHasSavedPassword" autocomplete="current-password" />
+                    <button
                       v-if="webdavHasSavedPassword"
-                      variant="ghost"
-                      size="icon-xs"
-                      class="absolute right-1 top-1/2 -translate-y-1/2"
+                      type="button"
+                      class="absolute right-1 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-3 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
                       :title="t('settings.syncClearSavedPassword')"
                       @click="
                         webdavRememberPassword = false;
@@ -2104,28 +3653,37 @@ watch(
                       "
                     >
                       <X class="size-3.5" />
-                    </Button>
+                    </button>
                   </div>
-                  <label class="flex items-center gap-2 text-xs text-muted-foreground">
-                    <input v-model="webdavRememberPassword" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
-                    <span>
-                      {{ t("settings.syncRememberWebDavPassword") }}
-                      <span v-if="webdavHasSavedPassword">{{ t("settings.syncSavedPassword") }}</span>
-                    </span>
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                      </TooltipTrigger>
-                      <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                        {{ t("settings.syncRememberWebDavPasswordDescription") }}
-                      </TooltipContent>
-                    </Tooltip>
-                  </label>
+                  <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                    <label class="flex items-center gap-2">
+                      <input v-model="webdavRememberPassword" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
+                      <span>
+                        {{ t("settings.syncRememberWebDavPassword") }}
+                        <span v-if="webdavHasSavedPassword">{{ t("settings.syncSavedPassword") }}</span>
+                      </span>
+                    </label>
+                    <HelpTooltip :label="t('settings.syncRememberWebDavPassword')">
+                      {{ t("settings.syncRememberWebDavPasswordDescription") }}
+                    </HelpTooltip>
+                  </div>
                 </div>
                 <div class="space-y-2 md:col-span-2">
                   <Label for="webdav-remote-path">{{ t("settings.syncRemotePath") }}</Label>
                   <Input id="webdav-remote-path" v-model="webdavRemotePath" autocomplete="off" />
                   <p class="text-xs text-muted-foreground">{{ t("settings.syncRemotePathDescription") }}</p>
+                </div>
+                <div class="space-y-2 md:col-span-2 rounded-md border bg-muted/20 px-3 py-3">
+                  <label class="flex items-center gap-2 text-xs">
+                    <input v-model="webdavAutoUploadEnabled" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
+                    <span class="font-medium">{{ t("settings.syncAutoUpload") }}</span>
+                  </label>
+                  <div class="flex items-center gap-2">
+                    <Label for="webdav-auto-upload-interval" class="text-xs text-muted-foreground">{{ t("settings.syncAutoUploadInterval") }}</Label>
+                    <Input id="webdav-auto-upload-interval" v-model.number="webdavAutoUploadIntervalMinutes" type="number" min="1" max="1440" step="1" class="h-7 w-24 text-xs" :disabled="!webdavAutoUploadEnabled" />
+                    <span class="text-xs text-muted-foreground">{{ t("settings.syncAutoUploadMinutes") }}</span>
+                  </div>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.syncAutoUploadDescription") }}</p>
                 </div>
               </div>
 
@@ -2143,12 +3701,21 @@ watch(
                 </div>
                 <div v-if="webdavSyncSecrets" class="space-y-2">
                   <Label for="webdav-secrets-passphrase">{{ t("settings.syncSecretsPassphrase") }}</Label>
-                  <Input
-                    id="webdav-secrets-passphrase"
-                    v-model="webdavSecretsPassphrase"
-                    type="password"
-                    autocomplete="new-password"
-                  />
+                  <div class="flex items-center gap-2">
+                    <PasswordInput id="webdav-secrets-passphrase" v-model="webdavSecretsPassphrase" class="min-w-0 flex-1" :placeholder="webdavHasSavedSecretsPassphrase ? '••••••••' : ''" :show-toggle="!webdavHasSavedSecretsPassphrase || !!webdavSecretsPassphrase" autocomplete="new-password" />
+                    <Button
+                      v-if="webdavHasSavedSecretsPassphrase"
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      class="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+                      :title="t('settings.syncClearSavedPassword')"
+                      :aria-label="t('settings.syncClearSavedPassword')"
+                      @click="clearWebDavSyncSecretsPassphrase"
+                    >
+                      <X class="size-3.5" />
+                    </Button>
+                  </div>
                   <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsPassphraseDescription") }}</p>
                 </div>
               </div>
@@ -2156,62 +3723,124 @@ watch(
 
             <!-- AI Settings Tab -->
             <section v-else-if="activeSettingsTab === 'ai'" class="flex flex-col gap-5 py-2">
-              <p class="text-xs text-muted-foreground">{{ t("ai.settingsHint") }}</p>
-
               <div class="space-y-3">
                 <div class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.provider") }}</Label>
                   <Select :model-value="aiEditProvider" @update:model-value="(v: any) => aiSelectProvider(v)">
-                    <SelectTrigger class="col-span-2 h-8 text-xs">
+                    <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
                       <SelectValue>
                         <span class="flex items-center gap-2">
-                          <AiProviderLogo
-                            :provider="selectedAiProviderPreset.provider"
-                            :label="selectedAiProviderPreset.label"
-                            :icon-slug="selectedAiProviderPreset.iconSlug"
-                          />
+                          <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" />
                           <span>{{ selectedAiProviderPreset.label }}</span>
                         </span>
                       </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem
-                        v-for="provider in aiProviderOptions"
-                        :key="provider.provider"
-                        :value="provider.provider"
-                      >
-                        <span class="flex items-center gap-2">
-                          <AiProviderLogo
-                            :provider="provider.provider"
-                            :label="provider.label"
-                            :icon-slug="provider.iconSlug"
-                          />
-                          <span>{{ provider.label }}</span>
+                      <SelectItem v-for="provider in aiProviderOptions" :key="provider.provider" :value="provider.provider">
+                        <span class="flex w-full items-center justify-between gap-4">
+                          <span class="flex items-center gap-2">
+                            <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
+                            <span>{{ provider.label }}</span>
+                          </span>
+                          <span class="flex shrink-0 items-center gap-1">
+                            <span v-if="aiEditProvider === provider.provider" class="rounded px-1 py-0.5 text-[10px] font-medium leading-none" :class="settingsStore.isAiProviderConfigured(provider.provider) ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'">{{
+                              t("ai.providerStatusActive")
+                            }}</span>
+                            <span v-else-if="settingsStore.isAiProviderConfigured(provider.provider)" class="rounded bg-green-500/15 px-1 py-0.5 text-[10px] font-medium leading-none text-green-700 dark:text-green-400">{{ t("ai.providerStatusConfigured") }}</span>
+                          </span>
                         </span>
                       </SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
-                  <Label class="text-right text-xs">API Key</Label>
-                  <Input
-                    v-model="aiEditApiKey"
-                    type="password"
-                    autocomplete="off"
-                    class="col-span-2 h-8 text-xs"
-                    :placeholder="aiRequiresApiKey ? '' : 'Optional'"
-                  />
+                <div v-if="aiIsCodexCli && !isWeb" class="rounded-md border px-3 py-2.5 text-xs" :class="aiCodexMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'">
+                  <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div class="min-w-0 space-y-1">
+                      <div class="flex min-w-0 items-center gap-2 font-medium">
+                        <Loader2 v-if="mcpStatusLoading" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                        <AlertTriangle v-else-if="aiCodexMcpNeedsInstall || mcpStatus?.error || mcpStatusError" class="h-3.5 w-3.5 shrink-0" />
+                        <CheckCircle2 v-else class="h-3.5 w-3.5 shrink-0" />
+                        <span>{{ t("ai.codexMcpRequiredTitle") }}</span>
+                        <Badge variant="outline" class="h-5 shrink-0 rounded-md border-current/30 px-1.5 text-[11px] font-normal">
+                          {{ mcpStatusLabel }}
+                        </Badge>
+                      </div>
+                      <p class="leading-relaxed">
+                        {{ t("ai.codexMcpRequiredDescription") }}
+                      </p>
+                      <p v-if="mcpStatus?.error || mcpStatusError" class="select-text leading-relaxed">
+                        {{ mcpStatusError || mcpStatus?.error }}
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <Button type="button" size="sm" variant="outline" class="h-7 bg-background/80 px-2 text-xs" :disabled="mcpStatusLoading" @click="refreshMcpStatus">
+                        <Loader2 v-if="mcpStatusLoading" class="mr-1 h-3 w-3 animate-spin" />
+                        <RefreshCw v-else class="mr-1 h-3 w-3" />
+                        {{ t("settings.mcpRefresh") }}
+                      </Button>
+                      <Button v-if="aiCodexMcpNeedsInstall || mcpStatus?.update_available" type="button" size="sm" class="h-7 px-2 text-xs" :disabled="!aiCodexMcpCanInstall" @click="installMcp">
+                        <Loader2 v-if="mcpInstalling" class="mr-1 h-3 w-3 animate-spin" />
+                        {{ mcpInstalling ? t("settings.mcpInstalling") : aiCodexMcpActionLabel }}
+                      </Button>
+                    </div>
+                  </div>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
-                  <Label class="text-right text-xs">Endpoint</Label>
-                  <Input
-                    v-model="aiEditEndpoint"
-                    placeholder="https://api.openai.com/v1"
-                    autocomplete="off"
-                    class="col-span-2 h-8 text-xs"
-                  />
+                <div v-if="!aiIsCodexCli && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">Authentication</Label>
+                  <Select v-model="aiEditAuthMethod">
+                    <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="api-key">API Key</SelectItem>
+                      <SelectItem value="bearer">Auth Token</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
+                  <PasswordInput v-model="aiEditApiKey" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
+                </div>
+
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">Endpoint</Label>
+                  <div class="col-span-2 space-y-1.5">
+                    <Input v-model="aiEditEndpoint" :placeholder="aiEndpointPlaceholder" autocomplete="off" class="h-8 text-xs" />
+                    <p v-if="aiEndpointHint" class="text-[11px] text-muted-foreground">{{ aiEndpointHint }}</p>
+                  </div>
+                </div>
+
+                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.codexCliPath") }}</Label>
+                  <div class="col-span-2 space-y-1.5">
+                    <Input v-model="aiEditCodexCliPath" autocomplete="off" class="h-8 text-xs" placeholder="codex" />
+                    <p class="text-[11px] text-muted-foreground">{{ t("ai.codexCliPathHint") }}</p>
+                    <p v-if="aiCodexPathError" class="text-[11px] text-destructive">{{ aiCodexPathError }}</p>
+                  </div>
+                </div>
+
+                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.codexCliEnv") }}</Label>
+                  <div class="col-span-2 space-y-2">
+                    <div class="space-y-1.5">
+                      <div v-for="row in aiEditCodexCliEnvRows" :key="row.id" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)_2rem] gap-2">
+                        <Input v-model="row.key" autocomplete="off" class="h-8 font-mono text-xs" :placeholder="t('ai.codexCliEnvKeyPlaceholder')" />
+                        <Input v-model="row.value" autocomplete="off" class="h-8 font-mono text-xs" :placeholder="t('ai.codexCliEnvValuePlaceholder')" />
+                        <Button type="button" variant="ghost" size="icon" class="h-8 w-8" :title="t('common.remove')" :aria-label="t('common.remove')" @click="removeCodexEnvRow(row.id)">
+                          <X class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                    <Button type="button" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="addCodexEnvRow">
+                      <Plus class="mr-1 h-3.5 w-3.5" />
+                      {{ t("ai.codexCliEnvAdd") }}
+                    </Button>
+                    <p v-if="aiCodexEnvError" class="text-[11px] text-destructive">{{ aiCodexEnvError }}</p>
+                    <p v-else class="text-[11px] text-muted-foreground">{{ t("ai.codexCliEnvHint") }}</p>
+                  </div>
                 </div>
 
                 <div class="grid grid-cols-3 items-start gap-3">
@@ -2230,6 +3859,7 @@ watch(
                         :display-name="displayAiModelName"
                         trigger-class="h-8 min-w-[104px] max-w-[150px] shrink-0 border border-border bg-background px-2 text-xs shadow-none hover:bg-muted/50"
                         content-class="w-72"
+                        item-class="h-auto min-h-8 py-1.5"
                         @update:model-value="aiSelectModel"
                         @update:open="onAiModelListOpen"
                       >
@@ -2237,24 +3867,13 @@ watch(
                           <span class="truncate">{{ loading ? t("ai.loadingModels") : t("ai.browseModels") }}</span>
                         </template>
                         <template #option-label="{ option, label }">
-                          <span class="flex min-w-0 flex-col">
-                            <span class="truncate">{{ label }}</span>
-                            <span v-if="label !== option" class="truncate text-[11px] text-muted-foreground">{{
-                              option
-                            }}</span>
+                          <span class="flex min-w-0 flex-col leading-tight">
+                            <span class="truncate">{{ aiModelOptionPresentation(option, label).primary }}</span>
+                            <span v-if="aiModelOptionSecondary(option, label)" class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ aiModelOptionSecondary(option, label) }}</span>
                           </span>
                         </template>
                       </SearchableSelect>
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="outline"
-                        class="shrink-0"
-                        :disabled="aiModelLoading || !aiModelListSupported"
-                        :title="t('ai.refreshModels')"
-                        :aria-label="t('ai.refreshModels')"
-                        @click="aiRefreshModels"
-                      >
+                      <Button type="button" size="icon" variant="outline" class="shrink-0" :disabled="aiModelLoading || !aiModelListSupported" :title="t('ai.refreshModels')" :aria-label="t('ai.refreshModels')" @click="aiRefreshModels">
                         <Loader2 v-if="aiModelLoading" class="h-3.5 w-3.5 animate-spin" />
                         <RefreshCw v-else class="h-3.5 w-3.5" />
                       </Button>
@@ -2266,38 +3885,37 @@ watch(
                   </div>
                 </div>
 
-                <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
-                  <Label class="text-right text-xs">API</Label>
-                  <div class="col-span-2 flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      class="h-8 flex-1 text-xs"
-                      :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }"
-                      @click="aiEditApiStyle = 'completions'"
-                      >/chat/completions</Button
-                    >
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      class="h-8 flex-1 text-xs"
-                      :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }"
-                      @click="aiEditApiStyle = 'responses'"
-                      >/responses</Button
-                    >
+                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.reasoningLevel") }}</Label>
+                  <div class="col-span-2 space-y-1.5">
+                    <Select v-model="aiEditReasoningLevel">
+                      <SelectTrigger inputClass="h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="option in aiReasoningLevelOptions" :key="option.value" :value="option.value">
+                          {{ t(option.labelKey) }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-[11px] text-muted-foreground">{{ t("ai.reasoningLevelHint") }}</p>
                   </div>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
+                  <Label class="text-right text-xs">API</Label>
+                  <div class="col-span-2 flex gap-2">
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }" @click="aiSelectApiStyle('completions')">/chat/completions</Button>
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }" @click="aiSelectApiStyle('responses')">/responses</Button>
+                    <Button v-if="aiSupportsAnthropicApiStyle" size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'anthropic-messages' }" @click="aiSelectApiStyle('anthropic-messages')">/messages</Button>
+                  </div>
+                </div>
+
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.enableThinking") }}</Label>
                   <div class="col-span-2 flex items-center gap-2">
                     <label class="flex items-center gap-2 text-xs text-muted-foreground">
-                      <input
-                        v-model="aiEditEnableThinking"
-                        type="checkbox"
-                        class="h-4 w-4 shrink-0 accent-primary"
-                        :disabled="!aiCompletionsMode || aiEditProvider === 'gemini'"
-                      />
+                      <input v-model="aiEditEnableThinking" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" :disabled="!aiCompletionsMode || aiEditProvider === 'gemini'" />
                       {{ aiEditEnableThinking ? t("ai.enableThinkingOn") : t("ai.enableThinkingOff") }}
                     </label>
                     <Popover>
@@ -2311,7 +3929,15 @@ watch(
                   </div>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
+                  <div class="col-span-2">
+                    <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
+                    <p class="mt-1 text-xs text-muted-foreground">{{ t("ai.contextWindowHint") }}</p>
+                  </div>
+                </div>
+
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxy") }}</Label>
                   <label class="col-span-2 flex items-center gap-2 text-xs text-muted-foreground">
                     <input v-model="aiEditProxyEnabled" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
@@ -2319,15 +3945,9 @@ watch(
                   </label>
                 </div>
 
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
-                  <Input
-                    v-model="aiEditProxyUrl"
-                    autocomplete="off"
-                    class="col-span-2 h-8 text-xs"
-                    placeholder="socks5://127.0.0.1:7890"
-                    :disabled="!aiEditProxyEnabled"
-                  />
+                  <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
                 </div>
               </div>
             </section>
@@ -2339,27 +3959,12 @@ watch(
                     <div class="flex items-center gap-2">
                       <PackageSearch class="h-4 w-4 text-muted-foreground" />
                       <Label class="text-base">{{ t("settings.mcpTitle") }}</Label>
-                      <Tooltip>
-                        <TooltipTrigger as-child>
-                          <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                        </TooltipTrigger>
-                        <TooltipContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                          {{ t("settings.mcpDescription") }}
-                        </TooltipContent>
-                      </Tooltip>
+                      <HelpTooltip :label="t('settings.mcpTitle')">
+                        {{ t("settings.mcpDescription") }}
+                      </HelpTooltip>
                     </div>
                   </div>
-                  <Badge
-                    variant="outline"
-                    class="shrink-0 rounded-md"
-                    :class="
-                      mcpStatusTone === 'ok'
-                        ? 'border-green-500/40 text-green-600 dark:text-green-400'
-                        : mcpStatusTone === 'warning'
-                          ? 'border-amber-500/40 text-amber-600 dark:text-amber-400'
-                          : 'text-muted-foreground'
-                    "
-                  >
+                  <Badge variant="outline" class="shrink-0 rounded-md" :class="mcpStatusTone === 'ok' ? 'border-green-500/40 text-green-600 dark:text-green-400' : mcpStatusTone === 'warning' ? 'border-amber-500/40 text-amber-600 dark:text-amber-400' : 'text-muted-foreground'">
                     <Loader2 v-if="mcpStatusLoading" class="mr-1 h-3 w-3 animate-spin" />
                     <CheckCircle2 v-else-if="mcpStatusTone === 'ok'" class="mr-1 h-3 w-3" />
                     <AlertTriangle v-else-if="mcpStatusTone === 'warning'" class="mr-1 h-3 w-3" />
@@ -2403,29 +4008,31 @@ watch(
               </div>
 
               <div class="space-y-2">
-                <Label>{{
-                  mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand")
-                }}</Label>
+                <Label>{{ mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand") }}</Label>
                 <div class="flex min-w-0 items-center gap-2">
-                  <div
-                    class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap"
-                  >
+                  <div class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap">
                     {{ mcpCommand }}
                   </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    :title="t('common.copy')"
-                    @click="copyMcpText('install', mcpCommand)"
-                  >
+                  <Button type="button" variant="outline" size="icon" :title="t('common.copy')" @click="copyMcpText('install', mcpCommand)">
                     <CheckCircle2 v-if="mcpCopied === 'install'" class="h-4 w-4 text-green-500" />
                     <Copy v-else class="h-4 w-4" />
                   </Button>
+                  <Button type="button" variant="default" :disabled="mcpInstalling || !mcpStatus?.npm_available || (mcpStatus?.installed && !mcpStatus?.update_available)" @click="installMcp">
+                    <Loader2 v-if="mcpInstalling" class="mr-2 h-4 w-4 animate-spin" />
+                    <CheckCircle2 v-if="!mcpInstalling && mcpStatus?.installed && !mcpStatus?.update_available" class="mr-2 h-4 w-4" />
+                    {{ mcpInstalling ? t("settings.mcpInstalling") : !mcpStatus?.installed ? t("settings.mcpInstallButton") : mcpStatus?.update_available ? t("settings.mcpUpdateButton") : t("settings.mcpUpToDate") }}
+                  </Button>
+                </div>
+                <div
+                  v-if="mcpInstallMessage"
+                  :class="['text-xs px-3 py-2 rounded-md border', mcpInstallError ? 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-800' : 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-300 dark:border-green-800']"
+                >
+                  {{ mcpInstallMessage }}
                 </div>
               </div>
 
               <div class="space-y-2">
+                <p class="text-xs text-muted-foreground">{{ t("settings.mcpConfigOptionsHint") }}</p>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="mcp-readonly-mode">{{ t("settings.mcpReadonlyMode") }}</Label>
@@ -2448,27 +4055,83 @@ watch(
               <div class="space-y-2">
                 <Label>{{ t("settings.mcpConfig") }}</Label>
                 <Tabs v-model="mcpConfigTab" class="space-y-3">
-                  <TabsList>
+                  <TabsList class="max-w-full overflow-x-auto">
                     <TabsTrigger value="claude">Claude Code</TabsTrigger>
+                    <TabsTrigger value="cursor">Cursor</TabsTrigger>
+                    <TabsTrigger value="trae">TRAE</TabsTrigger>
+                    <TabsTrigger value="vscode">VS Code</TabsTrigger>
+                    <TabsTrigger value="windsurf">Windsurf</TabsTrigger>
                     <TabsTrigger value="codex">Codex</TabsTrigger>
+                    <TabsTrigger value="opencode">OpenCode</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="claude" class="m-0">
                     <div class="relative rounded-md border bg-background p-3">
-                      <pre
-                        class="overflow-x-auto whitespace-pre text-xs leading-relaxed"
-                      ><code>{{ mcpClaudeRecommendedConfig }}</code></pre>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        class="absolute right-2 top-2 h-7 w-7"
-                        :title="t('common.copy')"
-                        @click="copyMcpText('claude-config', mcpClaudeRecommendedConfig)"
-                      >
+                      <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpJsonRecommendedConfig }}</code></pre>
+                      <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('claude-config', mcpJsonRecommendedConfig)">
                         <CheckCircle2 v-if="mcpCopied === 'claude-config'" class="h-3.5 w-3.5 text-green-500" />
                         <Copy v-else class="h-3.5 w-3.5" />
                       </Button>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="cursor" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpCursorConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpJsonRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('cursor-config', mcpJsonRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'cursor-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="trae" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpTraeConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpJsonRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('trae-config', mcpJsonRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'trae-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="vscode" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpVsCodeConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpVsCodeRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('vscode-config', mcpVsCodeRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'vscode-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="windsurf" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpWindsurfConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpJsonRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('windsurf-config', mcpJsonRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'windsurf-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
                     </div>
                   </TabsContent>
 
@@ -2478,18 +4141,24 @@ watch(
                         {{ t("settings.mcpCodexConfigPath") }}
                       </div>
                       <div class="relative rounded-md border bg-background p-3">
-                        <pre
-                          class="overflow-x-auto whitespace-pre text-xs leading-relaxed"
-                        ><code>{{ mcpCodexRecommendedConfig }}</code></pre>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="icon"
-                          class="absolute right-2 top-2 h-7 w-7"
-                          :title="t('common.copy')"
-                          @click="copyMcpText('codex-config', mcpCodexRecommendedConfig)"
-                        >
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpCodexRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('codex-config', mcpCodexRecommendedConfig)">
                           <CheckCircle2 v-if="mcpCopied === 'codex-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="opencode" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpOpenCodeConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpOpenCodeRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('opencode-config', mcpOpenCodeRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'opencode-config'" class="h-3.5 w-3.5 text-green-500" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -2498,10 +4167,7 @@ watch(
                 </Tabs>
               </div>
 
-              <div
-                v-if="mcpStatus?.error || mcpStatusError"
-                class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
-              >
+              <div v-if="mcpStatus?.error || mcpStatusError" class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
                 {{ mcpStatusError || mcpStatus?.error }}
               </div>
 
@@ -2515,59 +4181,60 @@ watch(
               <div class="space-y-3">
                 <Label class="text-base">{{ t("auth.changePassword") }}</Label>
                 <p class="text-sm text-muted-foreground">{{ t("auth.changePasswordDescription") }}</p>
-                <Input
-                  v-model="oldPassword"
-                  type="password"
-                  :placeholder="t('auth.oldPassword')"
-                  class="h-9"
-                  autocomplete="off"
-                />
-                <Input
-                  v-model="newPassword"
-                  type="password"
-                  :placeholder="t('auth.newPassword')"
-                  class="h-9"
-                  autocomplete="off"
-                />
-                <Input
-                  v-model="confirmNewPassword"
-                  type="password"
-                  :placeholder="t('auth.confirmPassword')"
-                  class="h-9"
-                  autocomplete="off"
-                />
-                <p
-                  v-if="passwordMessage"
-                  class="text-xs"
-                  :class="passwordError ? 'text-destructive' : 'text-green-500'"
-                >
+                <PasswordInput v-model="oldPassword" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="off" />
+                <PasswordInput v-model="newPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="off" />
+                <PasswordInput v-model="confirmNewPassword" :placeholder="t('auth.confirmPassword')" inputClass="h-9" autocomplete="off" />
+                <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
                   {{ passwordMessage }}
                 </p>
               </div>
             </section>
 
             <section v-else-if="activeSettingsTab === 'about'" class="flex flex-col gap-5 py-2">
-              <div class="rounded-lg border bg-muted/20 p-4">
-                <div class="flex items-start justify-between gap-4">
+              <div class="rounded-lg border p-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div class="min-w-0 space-y-1">
-                    <div class="text-lg font-semibold">DBX</div>
-                    <p class="text-sm text-muted-foreground">{{ t("settings.aboutDescription") }}</p>
+                    <Label>{{ t("settings.supportInfoTitle") }}</Label>
+                    <p class="text-sm text-muted-foreground">{{ t("settings.supportInfoDescription") }}</p>
                   </div>
-                  <div
-                    v-if="displayedAppVersion"
-                    class="rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground"
-                  >
-                    {{ displayedAppVersion }}
+                  <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="appSupportInfoLoading && !appSupportInfo" @click="copyAppSupportInfo">
+                    <Loader2 v-if="appSupportInfoLoading && !appSupportInfo" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                    <CheckCircle2 v-else-if="appSupportInfoCopied" class="mr-1 h-3.5 w-3.5" />
+                    <Copy v-else class="mr-1 h-3.5 w-3.5" />
+                    {{ appSupportInfoCopied ? t("settings.supportInfoCopied") : t("settings.supportInfoCopy") }}
+                  </Button>
+                </div>
+                <div v-if="appSupportInfoRows.length" class="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div v-for="row in appSupportInfoRows" :key="row.key" class="min-w-0 rounded-md bg-muted/30 px-3 py-2">
+                    <div class="text-xs font-medium text-muted-foreground">{{ row.label }}</div>
+                    <div class="mt-1 min-w-0 select-text break-words font-mono text-xs text-foreground">{{ row.value }}</div>
                   </div>
+                </div>
+                <p v-else class="mt-4 text-sm text-muted-foreground">{{ t("settings.supportInfoLoading") }}</p>
+                <p v-if="appSupportInfoError" class="mt-3 text-xs text-destructive">{{ t("settings.supportInfoLoadFailed", { message: appSupportInfoError }) }}</p>
+              </div>
+
+              <div class="rounded-lg border p-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ t("settings.updateDownloadSource") }}</Label>
+                    <p class="text-sm text-muted-foreground">{{ t("settings.updateDownloadSourceDescription") }}</p>
+                  </div>
+                  <Select :model-value="editUpdateDownloadSource" @update:model-value="onUpdateDownloadSourceChange">
+                    <SelectTrigger class="h-9 w-full sm:w-[180px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="official">{{ t("settings.updateDownloadSourceOfficial") }}</SelectItem>
+                      <SelectItem value="cnb">{{ t("settings.updateDownloadSourceCnb") }}</SelectItem>
+                      <SelectItem value="atomgit">{{ t("settings.updateDownloadSourceAtomgit") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 
               <div class="grid gap-3 sm:grid-cols-2">
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.community") }}
                   </div>
@@ -2582,30 +4249,18 @@ watch(
                   </div>
                   <div class="mt-1 font-mono text-base">1087880322</div>
                 </button>
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://discord.gg/W7NyVDRt6a')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://discord.gg/W7NyVDRt6a')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.community") }}
                   </div>
                   <div class="mt-3 flex items-center gap-2 text-sm font-medium">
-                    <img
-                      src="https://cdn.simpleicons.org/discord/5865F2"
-                      alt="Discord"
-                      class="h-7 w-7 rounded-md bg-white p-1"
-                    />
+                    <img src="https://cdn.simpleicons.org/discord/5865F2" alt="Discord" class="h-7 w-7 rounded-md bg-white p-1" />
                     Discord
                     <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
                   </div>
                   <div class="mt-1 text-sm text-primary">discord.gg/W7NyVDRt6a</div>
                 </button>
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.community") }}
                   </div>
@@ -2622,30 +4277,18 @@ watch(
                   </div>
                   <div class="mt-1 text-sm text-primary">{{ t("settings.wechatGroupInvite") }}</div>
                 </button>
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://github.com/t8y2/dbx')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://github.com/t8y2/dbx')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.project") }}
                   </div>
                   <div class="mt-3 flex items-center gap-2 text-sm font-medium">
-                    <img
-                      src="https://cdn.simpleicons.org/github/181717"
-                      alt="GitHub"
-                      class="h-7 w-7 rounded-md bg-white p-1"
-                    />
+                    <img src="https://cdn.simpleicons.org/github/181717" alt="GitHub" class="h-7 w-7 rounded-md bg-white p-1" />
                     {{ t("settings.openSource") }}
                     <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
                   </div>
                   <div class="mt-1 text-sm text-primary">github.com/t8y2/dbx</div>
                 </button>
-                <button
-                  type="button"
-                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  @click="openExternalUrl('https://dbxio.com')"
-                >
+                <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://dbxio.com')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                     {{ t("settings.project") }}
                   </div>
@@ -2660,71 +4303,57 @@ watch(
             </section>
           </div>
 
-          <DialogFooter
-            v-if="hasSettingsApplyFooter(activeSettingsTab as SettingsCategory)"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
-          >
-            <Button variant="outline" @click="resetDefaults">
+          <DialogFooter v-if="hasSettingsApplyFooter(activeSettingsTab as SettingsCategory)" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
+            <Button variant="outline" @click="resetDefaultsForTab(activeSettingsTab as SettingsCategory)">
               {{ t("settings.resetDefaults") }}
             </Button>
             <div class="flex-1" />
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
-            <Button :disabled="!hasChanges() || hasBlockingShortcutConflicts" @click="applySettings">
+            <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
               {{ t("settings.apply") }}
             </Button>
-            <Button :disabled="!hasChanges() || hasBlockingShortcutConflicts" @click="applySettingsAndClose">
+            <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
               {{ t("settings.applyAndClose") }}
             </Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'ai'"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
-          >
+          <DialogFooter v-else-if="activeSettingsTab === 'ai'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
             <div class="flex flex-1 items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                :disabled="
-                  aiTesting ||
-                  (aiRequiresApiKey && !aiEditApiKey?.trim()) ||
-                  !aiEditEndpoint?.trim() ||
-                  !aiEditModel?.trim()
-                "
-                @click="aiTestConn"
-              >
+              <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCodexValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCodexCli && !aiEditEndpoint?.trim()) || (!aiIsCodexCli && !aiEditModel?.trim())" @click="aiTestConn">
                 <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
                 {{ t("connection.test") }}
               </Button>
-              <span v-if="aiTestResult === 'success'" class="text-xs text-green-500">
-                {{ t("connection.testSuccess") }}
+              <span v-if="aiTestResult === 'success'" class="text-xs text-green-500 flex items-center gap-1.5">
+                <span>{{ t("connection.testSuccess") }}</span>
+                <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
               </span>
-              <span
-                v-else-if="aiTestResult === 'error'"
-                class="text-xs text-destructive truncate max-w-[200px]"
-                :title="aiTestError"
-              >
-                {{ aiTestError }}
+              <span v-else-if="aiTestResult === 'error'" class="min-w-0 max-w-[360px] flex items-center gap-1.5 text-xs text-destructive">
+                <span class="select-text truncate" :title="aiTestError">{{ aiTestError }}</span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  class="h-6 w-6 shrink-0 text-destructive/80 hover:text-destructive"
+                  :title="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                  :aria-label="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                  @click="copyAiTestError"
+                >
+                  <CheckCircle2 v-if="aiTestErrorCopied" class="h-3.5 w-3.5" />
+                  <Copy v-else class="h-3.5 w-3.5" />
+                </Button>
               </span>
             </div>
-            <Button variant="outline" @click="emit('update:open', false)">{{ t("common.close") }}</Button>
-            <Button :disabled="!aiHasChanges()" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
+            <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
+            <Button :disabled="!aiHasChanges() || !!aiCodexValidationError" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'sync'"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 gap-3 sm:gap-3"
-          >
-            <Button variant="outline" @click="emit('update:open', false)">
+          <DialogFooter v-else-if="activeSettingsTab === 'sync'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
-            <p
-              v-if="webdavMessage"
-              class="text-xs self-center truncate max-w-[280px]"
-              :class="webdavError ? 'text-destructive' : 'text-green-500'"
-            >
+            <p v-if="webdavMessage" class="text-xs self-center truncate max-w-[280px]" :class="webdavError ? 'text-destructive' : 'text-green-500'">
               {{ webdavMessage }}
             </p>
             <div class="flex-1" />
@@ -2744,11 +4373,8 @@ watch(
             </Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'mcp' && !isWeb"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
-          >
-            <Button variant="outline" @click="emit('update:open', false)">
+          <DialogFooter v-else-if="activeSettingsTab === 'mcp' && !isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <div class="flex-1" />
@@ -2763,40 +4389,36 @@ watch(
             </Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'security' && isWeb"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
-          >
-            <Button variant="outline" @click="emit('update:open', false)">
+          <DialogFooter v-else-if="activeSettingsTab === 'security' && isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
-            <Button
-              :disabled="changingPassword || !oldPassword || !newPassword || !confirmNewPassword"
-              @click="changePassword"
-            >
+            <Button :disabled="changingPassword || !oldPassword || !newPassword || !confirmNewPassword" @click="changePassword">
               {{ t("auth.changePassword") }}
             </Button>
           </DialogFooter>
 
-          <DialogFooter
-            v-else-if="activeSettingsTab === 'about'"
-            class="mx-0 mb-0 shrink-0 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3"
-          >
-            <Button variant="outline" @click="emit('update:open', false)">
+          <DialogFooter v-else-if="activeSettingsTab === 'about'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
+            <Button variant="outline" @click="resetAllDefaults">
+              {{ t("settings.resetAllDefaults") }}
+            </Button>
+            <div class="flex-1" />
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
+            </Button>
+            <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
+              {{ t("settings.apply") }}
+            </Button>
+            <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettingsAndClose">
+              {{ t("settings.applyAndClose") }}
             </Button>
           </DialogFooter>
         </div>
       </div>
-    </DialogContent>
+    </component>
 
     <!-- Theme Customizer Dialog -->
-    <ThemeCustomizerDialog
-      v-model:open="showThemeCustomizer"
-      :themes="editCustomThemes"
-      :active-theme-id="editActiveCustomThemeId"
-      @save="handleThemeSave"
-    />
+    <ThemeCustomizerDialog v-model:open="showThemeCustomizer" :themes="editCustomThemes" :active-theme-id="editActiveCustomThemeId" @save="handleThemeSave" />
 
     <!-- Snippet Add/Edit Dialog -->
     <Dialog :open="snippetDialogOpen" @update:open="snippetDialogOpen = $event">
@@ -2809,19 +4431,11 @@ watch(
         <div class="flex flex-col gap-4 py-2">
           <div class="flex flex-col gap-1.5">
             <Label for="snippet-label">{{ t("settings.snippetsLabel") }}</Label>
-            <Input
-              id="snippet-label"
-              v-model="snippetForm.label"
-              :placeholder="t('settings.snippetsLabelPlaceholder')"
-            />
+            <Input id="snippet-label" v-model="snippetForm.label" :placeholder="t('settings.snippetsLabelPlaceholder')" />
           </div>
           <div class="flex flex-col gap-1.5">
             <Label for="snippet-prefix">{{ t("settings.snippetsPrefix") }}</Label>
-            <Input
-              id="snippet-prefix"
-              v-model="snippetForm.prefix"
-              :placeholder="t('settings.snippetsPrefixPlaceholder')"
-            />
+            <Input id="snippet-prefix" v-model="snippetForm.prefix" :placeholder="t('settings.snippetsPrefixPlaceholder')" />
             <p v-if="snippetFormPrefixError" class="text-xs text-destructive">{{ snippetFormPrefixError }}</p>
           </div>
           <div class="flex flex-col gap-1.5">
@@ -2841,5 +4455,5 @@ watch(
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  </Dialog>
+  </component>
 </template>

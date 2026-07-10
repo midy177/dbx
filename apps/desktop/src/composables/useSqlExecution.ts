@@ -1,13 +1,19 @@
-import { ref, type Ref, type ComputedRef } from "vue";
+import { ref, watch, type Ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import { classifySqlActivityKind } from "@/lib/historyActivityKind";
-import { sqlMetadataRefreshTarget } from "@/lib/sqlMetadataRefresh";
-import type { ConnectionConfig, QueryTab } from "@/types/database";
+import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { canExecuteWithoutSelectedDatabase } from "@/lib/connection/connectionLevelDatabaseBootstrap";
+import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
+import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
+import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redis/redisCommandSafety";
+import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import { extractSqlParameterDescriptors, type SqlParameterDescriptor } from "@/lib/sql/sqlParameters";
+import { expandSqlVariables } from "@/lib/sql/sqlVariables";
+import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 
@@ -36,8 +42,10 @@ export function useSqlExecution(deps: {
   activeTab: ComputedRef<QueryTab | undefined>;
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
   executableSql: ComputedRef<string>;
-  resolveExecutableSql?: () => Promise<string>;
-  activeOutputView: Ref<"result" | "explain" | "chart">;
+  resolveExecutableSql?: (snapshot?: SqlExecutionSnapshot) => Promise<string>;
+  activeOutputView: Ref<"result" | "summary" | "explain" | "chart">;
+  blockDangerousRedisCommands?: Ref<boolean>;
+  onMissingDatabase?: () => void;
 }) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
@@ -51,33 +59,82 @@ export function useSqlExecution(deps: {
   const showDangerDialog = ref(false);
   const suppressDangerConfirm = ref(false);
   const explainMode = ref<"explain" | "autotrace">("explain");
+  const showSqlParameterDialog = ref(false);
+  const sqlParameterSourceSql = ref("");
+  const sqlParameterNames = ref<SqlParameterDescriptor[]>([]);
+  const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
 
-  async function resolvedExecutableSql(): Promise<string> {
-    return deps.resolveExecutableSql ? await deps.resolveExecutableSql() : deps.executableSql.value;
+  async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<string> {
+    if (typeof source === "string") return expandSqlVariables(source).sql;
+    if (deps.resolveExecutableSql) return expandSqlVariables(await deps.resolveExecutableSql(source)).sql;
+    if (isSqlExecutionSnapshot(source)) return expandSqlVariables(resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos })).sql;
+    return expandSqlVariables(deps.executableSql.value).sql;
   }
 
-  async function tryExecute(sqlOverride?: string) {
+  async function tryExecute(sqlOverride?: SqlExecutionOverride) {
     const tab = deps.activeTab.value;
-    const sql = sqlOverride ?? (await resolvedExecutableSql());
+    const sql = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) return;
+    if (requiresDatabaseSelection(tab, deps.activeConnection.value, sql)) {
+      deps.onMissingDatabase?.();
+      return;
+    }
+    if (supportsSqlTemplateParameters(deps.activeConnection.value) && prepareSqlParameterDialog(sql)) return;
+    await continueExecute(sql);
+  }
+
+  async function continueExecute(sql: string) {
+    // Redis: block dangerous commands when toggle is on (check each line for multi-line input)
+    if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
+      const commands = sql
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      for (const cmd of commands) {
+        const safety = classifyRedisCommandSafety(cmd);
+        if (safety === "blocked") {
+          toast(t("redis.blockedCommand", { command: firstRedisCommandToken(cmd) }), 5000);
+          return;
+        }
+      }
+    }
     if (isDangerousSql(sql) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;
       pendingDangerSql.value = sql;
       suppressDangerConfirm.value = false;
       showDangerDialog.value = true;
     } else {
-      doExecute(sql);
+      await doExecute(sql);
     }
+  }
+
+  function prepareSqlParameterDialog(sql: string): boolean {
+    const databaseType = deps.activeConnection.value?.db_type;
+    const parameters = extractSqlParameterDescriptors(sql, { databaseType });
+    if (!parameters.length) return false;
+    sqlParameterSourceSql.value = sql;
+    sqlParameterNames.value = parameters;
+    sqlParameterDatabaseType.value = databaseType;
+    showSqlParameterDialog.value = true;
+    return true;
   }
 
   async function doExecute(sql?: string) {
     sql ??= await resolvedExecutableSql();
     const tab = deps.activeTab.value;
     if (!tab || !sql.trim()) return;
+    if (requiresDatabaseSelection(tab, deps.activeConnection.value, sql)) {
+      deps.onMissingDatabase?.();
+      return;
+    }
     deps.activeOutputView.value = "result";
     const connName = connectionStore.getConfig(tab.connectionId)?.name || "";
     const start = Date.now();
-    await queryStore.executeCurrentSql(sql);
+    const isRedis = deps.activeConnection.value?.db_type === "redis";
+    await queryStore.executeCurrentSql(sql, isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : undefined);
+    if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
+      deps.activeOutputView.value = "summary";
+    }
     const elapsed = Date.now() - start;
     const success = !tab.result?.columns.includes("Error");
     historyStore.add({
@@ -115,9 +172,9 @@ export function useSqlExecution(deps: {
     return t("explain.emptySql");
   }
 
-  async function tryExplain(sqlOverride?: string) {
+  async function tryExplain(sqlOverride?: SqlExecutionOverride) {
     const tab = deps.activeTab.value;
-    const sql = sqlOverride ?? (await resolvedExecutableSql());
+    const sql = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) {
       toast(t("explain.emptySql"));
       return;
@@ -144,6 +201,21 @@ export function useSqlExecution(deps: {
     await doExecute(sql);
   }
 
+  async function onSqlParametersConfirm(sql: string) {
+    showSqlParameterDialog.value = false;
+    sqlParameterSourceSql.value = "";
+    sqlParameterNames.value = [];
+    sqlParameterDatabaseType.value = undefined;
+    await continueExecute(sql);
+  }
+
+  watch(showSqlParameterDialog, (open) => {
+    if (open) return;
+    sqlParameterSourceSql.value = "";
+    sqlParameterNames.value = [];
+    sqlParameterDatabaseType.value = undefined;
+  });
+
   return {
     dangerSql,
     pendingDangerSql,
@@ -154,6 +226,26 @@ export function useSqlExecution(deps: {
     cancelActiveExecution,
     tryExplain,
     onDangerConfirm,
+    showSqlParameterDialog,
+    sqlParameterSourceSql,
+    sqlParameterNames,
+    sqlParameterDatabaseType,
+    onSqlParametersConfirm,
     explainMode,
   };
+}
+
+function supportsSqlTemplateParameters(connection: ConnectionConfig | undefined): boolean {
+  if (!connection) return false;
+  return connection.db_type !== "redis" && connection.db_type !== "mongodb";
+}
+
+export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, sql = ""): boolean {
+  if (tab.mode !== "query") return false;
+  if (!connection) return false;
+  if (tab.database) return false;
+  if (tab.database === "" && usesTreeSchemaMode(connection.db_type)) return false;
+  if (isSingleDatabase(connection.db_type)) return false;
+  if (canExecuteWithoutSelectedDatabase(connection, sql)) return false;
+  return !["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "zookeeper"].includes(connection.db_type);
 }

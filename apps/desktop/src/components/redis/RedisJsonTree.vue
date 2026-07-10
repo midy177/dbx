@@ -2,6 +2,7 @@
 import { computed, defineComponent, h, ref, type VNodeChild } from "vue";
 import { ChevronDown, ChevronRight } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { isLosslessJsonNumber } from "@/lib/common/safeJsonFormat";
 
 defineOptions({ name: "RedisJsonTree" });
 
@@ -38,7 +39,7 @@ const rootNode = computed<JsonNode>(() => ({
 }));
 
 function isContainer(value: unknown): value is Record<string, unknown> | unknown[] {
-  return value !== null && typeof value === "object";
+  return value !== null && typeof value === "object" && !isLosslessJsonNumber(value);
 }
 
 function containerKind(value: unknown): "array" | "object" {
@@ -74,6 +75,7 @@ function nodeSummary(value: unknown): string {
 }
 
 function scalarClass(value: unknown): string {
+  if (isLosslessJsonNumber(value)) return "json-tree-number";
   if (typeof value === "string") return "json-tree-string";
   if (typeof value === "number") return "json-tree-number";
   if (typeof value === "boolean") return "json-tree-boolean";
@@ -82,6 +84,7 @@ function scalarClass(value: unknown): string {
 }
 
 function scalarText(value: unknown): string {
+  if (isLosslessJsonNumber(value)) return value.raw;
   if (typeof value === "string") return JSON.stringify(value);
   if (value === null) return "null";
   return String(value);
@@ -128,12 +131,7 @@ function renderJsonNode(node: JsonNode): VNodeChild {
   }
 
   if (node.parentKind !== "root") {
-    rowChildren.push(
-      node.parentKind === "array"
-        ? h("span", { class: "redis-json-index" }, `[${node.label}]`)
-        : highlightedJsonSpan("redis-json-key", JSON.stringify(node.label)),
-      h("span", { class: "redis-json-colon" }, ":"),
-    );
+    rowChildren.push(node.parentKind === "array" ? h("span", { class: "redis-json-index" }, `[${node.label}]`) : highlightedJsonSpan("redis-json-key", JSON.stringify(node.label)), h("span", { class: "redis-json-colon" }, ":"));
   }
 
   if (container) {
@@ -146,10 +144,7 @@ function renderJsonNode(node: JsonNode): VNodeChild {
     rowChildren.push(highlightedJsonSpan(scalarClass(node.value), scalarText(node.value)));
   }
 
-  return h("div", { class: "redis-json-node" }, [
-    h("div", { class: "redis-json-row", style: { paddingLeft: indent } }, rowChildren),
-    container && !collapsed ? h("div", { class: "redis-json-children" }, children.map(renderJsonNode)) : null,
-  ]);
+  return h("div", { class: "redis-json-node" }, [h("div", { class: "redis-json-row", style: { paddingLeft: indent } }, rowChildren), container && !collapsed ? h("div", { class: "redis-json-children" }, children.map(renderJsonNode)) : null]);
 }
 
 const JsonTreeNode = defineComponent({

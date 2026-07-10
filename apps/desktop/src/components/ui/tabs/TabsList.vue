@@ -4,7 +4,7 @@ import type { HTMLAttributes } from "vue";
 import type { TabsListVariants } from ".";
 import { reactiveOmit } from "@vueuse/core";
 import { TabsList } from "reka-ui";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/common/utils";
 import { tabsListVariants } from ".";
 
 const props = withDefaults(
@@ -23,12 +23,7 @@ const delegatedProps = reactiveOmit(props, "class", "variant");
 </script>
 
 <template>
-  <TabsList
-    data-slot="tabs-list"
-    :data-variant="variant"
-    v-bind="delegatedProps"
-    :class="cn(tabsListVariants({ variant }), props.class)"
-  >
+  <TabsList data-slot="tabs-list" :data-variant="variant" v-bind="delegatedProps" :class="cn(tabsListVariants({ variant }), props.class)">
     <slot />
   </TabsList>
 </template>

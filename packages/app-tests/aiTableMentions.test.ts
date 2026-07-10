@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { formatAiTableMention, parseAiTableMentions } from "../../apps/desktop/src/lib/aiTableMentions.ts";
+import { formatAiTableMention, parseAiTableMentions } from "../../apps/desktop/src/lib/ai/aiTableMentions.ts";
 
 test("parses simple and schema-qualified AI table mentions", () => {
   assert.deepEqual(parseAiTableMentions("show @users and join @public.orders"), [
@@ -17,9 +17,7 @@ test("parses quoted AI table mentions with spaces and dots", () => {
 });
 
 test("deduplicates AI table mentions case-insensitively", () => {
-  assert.deepEqual(parseAiTableMentions("check @public.Users then @PUBLIC.users"), [
-    { raw: "@public.Users", schema: "public", table: "Users" },
-  ]);
+  assert.deepEqual(parseAiTableMentions("check @public.Users then @PUBLIC.users"), [{ raw: "@public.Users", schema: "public", table: "Users" }]);
 });
 
 test("formats AI table mentions with quotes only when needed", () => {

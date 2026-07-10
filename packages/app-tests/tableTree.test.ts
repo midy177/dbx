@@ -1,12 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import {
-  buildGroupedObjectTreeNodes,
-  buildObjectGroupPlaceholderNodes,
-  buildSimpleObjectTreeNodes,
-  buildTableTreeNodes,
-  mergeTableInfosIntoObjects,
-} from "../../apps/desktop/src/lib/tableTree.ts";
+import { buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, filterSimpleSidebarSupplementalObjects, mergeTableInfosIntoObjects, mergeTableTreePageChildren } from "../../apps/desktop/src/lib/table/tableTree.ts";
 import type { ObjectInfo, TableInfo, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function table(name: string, parent?: string): TableInfo {
@@ -78,6 +72,36 @@ test("buildTableTreeNodes keeps partitions visible when their parent is not load
   assert.deepEqual(
     nodes.map((node) => node.label),
     ["events_2026"],
+  );
+});
+
+test("mergeTableTreePageChildren attaches later page partitions to loaded parents", () => {
+  const firstPage = buildTableTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    tables: [table("events"), table("events_region_0", "events")],
+  });
+  const secondPage = buildTableTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    tables: [table("events_region_0_2026_01", "events_region_0")],
+  });
+
+  const merged = mergeTableTreePageChildren(firstPage, secondPage, "conn", "app");
+  assert.deepEqual(
+    merged.map((node) => node.label),
+    ["events"],
+  );
+
+  const regionPartition = partitionGroup(merged[0])?.children?.[0];
+  assert.equal(regionPartition?.label, "events_region_0");
+  assert.deepEqual(
+    partitionGroup(regionPartition!)?.children?.map((node) => node.label),
+    ["events_region_0_2026_01"],
   );
 });
 
@@ -171,13 +195,37 @@ test("buildGroupedObjectTreeNodes groups Oracle packages and package bodies", ()
   );
 });
 
+test("buildGroupedObjectTreeNodes groups materialized views separately from views", () => {
+  const groups = buildGroupedObjectTreeNodes({
+    nodeId: "conn:app:APP",
+    connectionId: "conn",
+    database: "app",
+    schema: "APP",
+    objects: [
+      { name: "ACTIVE_USERS", object_type: "VIEW", schema: "APP" },
+      { name: "USER_SUMMARY_MV", object_type: "MATERIALIZED_VIEW", schema: "APP" },
+    ],
+  });
+
+  const viewGroup = groups.find((node) => node.type === "group-views");
+  const materializedViewGroup = groups.find((node) => node.type === "group-materialized-views");
+  assert.deepEqual(
+    viewGroup?.children?.map((node) => ({ label: node.label, type: node.type })),
+    [{ label: "ACTIVE_USERS", type: "view" }],
+  );
+  assert.deepEqual(
+    materializedViewGroup?.children?.map((node) => ({ label: node.label, type: node.type })),
+    [{ label: "USER_SUMMARY_MV", type: "materialized_view" }],
+  );
+});
+
 test("buildObjectGroupPlaceholderNodes creates capability-driven lazy sidebar groups", () => {
   const groups = buildObjectGroupPlaceholderNodes({
     nodeId: "conn:app:HR",
     connectionId: "conn",
     database: "app",
     schema: "HR",
-    objectTypes: ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"],
+    objectTypes: ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"],
   });
 
   assert.deepEqual(
@@ -187,11 +235,12 @@ test("buildObjectGroupPlaceholderNodes creates capability-driven lazy sidebar gr
       { label: "tree.views", type: "group-views", count: undefined, children: [] },
       { label: "tree.procedures", type: "group-procedures", count: undefined, children: [] },
       { label: "tree.functions", type: "group-functions", count: undefined, children: [] },
+      { label: "tree.sequences", type: "group-sequences", count: undefined, children: [] },
     ],
   );
 });
 
-test("buildSimpleObjectTreeNodes keeps routines and packages visible in flat sidebar mode", () => {
+test("buildSimpleObjectTreeNodes keeps routines, sequences, and packages visible in flat sidebar mode", () => {
   const nodes = buildSimpleObjectTreeNodes({
     nodeId: "conn:app:HR",
     connectionId: "conn",
@@ -202,6 +251,7 @@ test("buildSimpleObjectTreeNodes keeps routines and packages visible in flat sid
       { name: "ACTIVE_ORDERS", object_type: "VIEW", schema: "HR" },
       { name: "REFRESH_STATS", object_type: "PROCEDURE", schema: "HR" },
       { name: "TOTAL_DUE", object_type: "FUNCTION", schema: "HR" },
+      { name: "ORDER_ID_SEQ", object_type: "SEQUENCE", schema: "HR" },
       { name: "PAYROLL", object_type: "PACKAGE", schema: "HR" },
       { name: "PAYROLL", object_type: "PACKAGE_BODY", schema: "HR" },
     ],
@@ -212,6 +262,7 @@ test("buildSimpleObjectTreeNodes keeps routines and packages visible in flat sid
     [
       { label: "ORDERS", type: "table" },
       { label: "ACTIVE_ORDERS", type: "view" },
+      { label: "ORDER_ID_SEQ", type: "sequence" },
       { label: "PAYROLL", type: "package" },
       { label: "PAYROLL", type: "package-body" },
       { label: "REFRESH_STATS", type: "procedure" },
@@ -241,6 +292,32 @@ test("mergeTableInfosIntoObjects restores views missing from object metadata", (
     [
       { name: "orders", type: "TABLE", schema: "public", comment: null },
       { name: "active_orders", type: "VIEW", schema: "public", comment: "current orders" },
+    ],
+  );
+});
+
+test("filterSimpleSidebarSupplementalObjects leaves paged tables and views to listTables", () => {
+  const supplemental = filterSimpleSidebarSupplementalObjects([
+    { name: "orders", object_type: "TABLE", schema: "public" },
+    { name: "active_orders", object_type: "VIEW", schema: "public" },
+    { name: "order_summary", object_type: "MATERIALIZED VIEW", schema: "public" },
+    { name: "refresh_stats", object_type: "PROCEDURE", schema: "public" },
+    { name: "total_due", object_type: "FUNCTION", schema: "public" },
+  ]);
+  const nodes = buildSimpleObjectTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    objects: mergeTableInfosIntoObjects(supplemental, [table("orders")], "public"),
+  });
+
+  assert.deepEqual(
+    nodes.map((node) => ({ label: node.label, type: node.type })),
+    [
+      { label: "orders", type: "table" },
+      { label: "refresh_stats", type: "procedure" },
+      { label: "total_due", type: "function" },
     ],
   );
 });

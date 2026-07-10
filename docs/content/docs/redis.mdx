@@ -14,22 +14,20 @@ The Redis key browser displays keys in a table format for easier scanning and fi
 - Use the search bar to filter keys by pattern (e.g., `user:*`, `cache:*`)
 - Key type, TTL, and size are shown inline
 
-<Callout type="info">
-For Redis instances with millions of keys, use specific key patterns in the search bar instead of loading the entire keyspace. Set the scan page size in Settings to control how many keys are fetched per batch.
-</Callout>
+<Callout type="info">For Redis instances with millions of keys, use specific key patterns in the search bar instead of loading the entire keyspace. Set the scan page size in Settings to control how many keys are fetched per batch.</Callout>
 
 ## Value Viewer and Editor
 
 Each Redis data type has a dedicated viewer and editor:
 
-| Type | Viewer | Editing |
-|---|---|---|
-| String | Plain text or JSON viewer | Inline text edit |
-| Hash | Field/value table with resizable columns | Edit individual fields |
-| List | Ordered list with index | Add, remove, reorder elements |
-| Set | Member list with cardinality | Add and remove members |
-| Sorted Set | Member list with scores | Edit members and scores |
-| Stream | Entry list with IDs | View stream entries |
+| Type       | Viewer                                   | Editing                       |
+| ---------- | ---------------------------------------- | ----------------------------- |
+| String     | Plain text or JSON viewer                | Inline text edit              |
+| Hash       | Field/value table with resizable columns | Edit individual fields        |
+| List       | Ordered list with index                  | Add, remove, reorder elements |
+| Set        | Member list with cardinality             | Add and remove members        |
+| Sorted Set | Member list with scores                  | Edit members and scores       |
+| Stream     | Entry list with IDs                      | View stream entries           |
 
 ## JSON Value Viewer
 
@@ -43,9 +41,7 @@ Search Redis values by content, not just keys:
 - Find Hash fields by value
 - Results are streamed progressively for large keyspaces
 
-<Callout type="warn">
-Value search scans all keys that match the current pattern. On large databases this can be resource-intensive. Narrow the key pattern before starting a value search.
-</Callout>
+<Callout type="warn">Value search scans all keys that match the current pattern. On large databases this can be resource-intensive. Narrow the key pattern before starting a value search.</Callout>
 
 ## Bulk Operations
 
@@ -61,6 +57,10 @@ Execute arbitrary Redis commands directly from the UI:
 - Type commands in Redis CLI syntax
 - Results are displayed in a structured table
 - Useful for `INFO`, `CONFIG GET`, `CLIENT LIST`, and other admin commands
+- **Command history navigation**: Use arrow keys (↑/↓) to navigate through previously executed commands
+- **Text selection and copy**: Select and copy command output directly from the terminal
+
+The command history is preserved per connection and helps you quickly rerun frequently used commands without retyping them.
 
 ## Flush Database
 
@@ -75,3 +75,14 @@ Enable key statistics tracking in Settings to monitor:
 - Idle time
 
 This data helps identify large or infrequently used keys that may need attention.
+
+## Slowlog Panel
+
+The **Slowlog** panel helps identify slow Redis commands:
+
+- View recent slow commands with execution time
+- Analyze query patterns that may need optimization
+- Useful for performance tuning and debugging production issues
+- Access slowlog from the Redis connection's tools menu
+
+Slowlog entries show the command, execution time, and timestamp, helping you identify performance bottlenecks in your Redis workload.

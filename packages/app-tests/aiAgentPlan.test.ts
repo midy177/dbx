@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildAiAgentPlan } from "../../apps/desktop/src/lib/aiAgentPlan.ts";
-import type { AiAction, AiAssistantMode } from "../../apps/desktop/src/lib/ai.ts";
+import { buildAiAgentPlan } from "../../apps/desktop/src/lib/ai/aiAgentPlan.ts";
+import type { AiAction, AiAssistantMode } from "../../apps/desktop/src/lib/ai/ai.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function conn(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -105,10 +105,21 @@ test("non-generate actions do not execute even in agent mode", () => {
 
   assert.deepEqual(plan.steps, [
     { kind: "generate_sql", status: "done", sql: "SELECT count(*) FROM users" },
-    { kind: "execute_sql", status: "skipped", reason: "unsupported_action" },
   ]);
   assert.equal(plan.executableSql, undefined);
   assert.equal(plan.handoffSql, undefined);
+});
+
+test("task-oriented Agent actions do not drive client-side execution", () => {
+  for (const action of ["query", "exploreSchema", "executeAndExplain"] as AiAction[]) {
+    const plan = buildAiAgentPlan(planInput({ action, instruction: "查一下用户数量" }));
+
+    assert.deepEqual(plan.steps, [
+      { kind: "generate_sql", status: "done", sql: "SELECT count(*) FROM users" },
+    ]);
+    assert.equal(plan.executableSql, undefined);
+    assert.equal(plan.handoffSql, undefined);
+  }
 });
 
 test("agent plan blocks dangerous SQL", () => {
@@ -172,18 +183,7 @@ test("agent plan ignores comment-only SQL blocks and executes the first real SQL
   const plan = buildAiAgentPlan(
     planInput({
       instruction: "查一下当前数据库里有哪些表",
-      assistantContent: [
-        "当前数据库中的表：",
-        "```sql",
-        "-- 当前数据库中的表（仅从已加载的 Schema 上下文得知）：",
-        "-- public.ihli_data",
-        "```",
-        "若需查看该表数据，可执行：",
-        "```sql",
-        "SELECT * FROM ihli_data",
-        "LIMIT 10;",
-        "```",
-      ].join("\n"),
+      assistantContent: ["当前数据库中的表：", "```sql", "-- 当前数据库中的表（仅从已加载的 Schema 上下文得知）：", "-- public.ihli_data", "```", "若需查看该表数据，可执行：", "```sql", "SELECT * FROM ihli_data", "LIMIT 10;", "```"].join("\n"),
     }),
   );
 

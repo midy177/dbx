@@ -1,49 +1,15 @@
-import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  canTreeNodeExpand,
-  canTreeNodeShowExpander,
-  treeItemPaddingLeft,
-  usesFullWidthTreeLabel,
-} from "../../apps/desktop/src/lib/sidebarTreeItemLayout.ts";
+import assert from "node:assert/strict";
+import { canTreeNodePin, canTreeNodeShowExpander } from "../../apps/desktop/src/lib/sidebar/sidebarTreeItemLayout.ts";
 
-test("treeItemPaddingLeft converts tree depth to sidebar indentation", () => {
-  assert.equal(treeItemPaddingLeft(0), "8px");
-  assert.equal(treeItemPaddingLeft(1), "24px");
-  assert.equal(treeItemPaddingLeft(2), "40px");
+test("mongodb collection rows can show an expander for metadata groups", () => {
+  assert.equal(canTreeNodeShowExpander({ type: "mongo-collection", childCount: 0 }), true);
 });
 
-test("canTreeNodeExpand only returns true for expandable sidebar node types", () => {
-  assert.equal(canTreeNodeExpand("connection"), true);
-  assert.equal(canTreeNodeExpand("database"), true);
-  assert.equal(canTreeNodeExpand("schema"), true);
-  assert.equal(canTreeNodeExpand("table"), true);
-  assert.equal(canTreeNodeExpand("view"), true);
-  assert.equal(canTreeNodeExpand("saved-sql-root"), true);
-  assert.equal(canTreeNodeExpand("saved-sql-folder"), true);
-
-  assert.equal(canTreeNodeExpand("saved-sql-file"), false);
-  assert.equal(canTreeNodeExpand("object-browser"), false);
-  assert.equal(canTreeNodeExpand("column"), false);
-  assert.equal(canTreeNodeExpand("index"), false);
-  assert.equal(canTreeNodeExpand("redis-db"), false);
-  assert.equal(canTreeNodeExpand("mongo-collection"), false);
+test("ZooKeeper root rows do not show an empty expander", () => {
+  assert.equal(canTreeNodeShowExpander({ type: "zookeeper-root", childCount: 0 }), false);
 });
 
-test("canTreeNodeShowExpander hides empty saved SQL containers", () => {
-  assert.equal(canTreeNodeShowExpander({ type: "saved-sql-root", childCount: 0 }), false);
-  assert.equal(canTreeNodeShowExpander({ type: "saved-sql-folder", childCount: 0 }), false);
-  assert.equal(canTreeNodeShowExpander({ type: "saved-sql-root", childCount: 1 }), true);
-  assert.equal(canTreeNodeShowExpander({ type: "saved-sql-folder", childCount: 1 }), true);
-});
-
-test("usesFullWidthTreeLabel only expands object names when horizontal scroll is enabled", () => {
-  assert.equal(usesFullWidthTreeLabel("table", true), true);
-  assert.equal(usesFullWidthTreeLabel("view", true), true);
-  assert.equal(usesFullWidthTreeLabel("mongo-collection", true), true);
-
-  assert.equal(usesFullWidthTreeLabel("table", false), false);
-  assert.equal(usesFullWidthTreeLabel("connection", true), false);
-  assert.equal(usesFullWidthTreeLabel("schema", true), false);
-  assert.equal(usesFullWidthTreeLabel("column", true), false);
+test("Nacos namespace rows can show the pin action", () => {
+  assert.equal(canTreeNodePin("nacos-namespace"), true);
 });

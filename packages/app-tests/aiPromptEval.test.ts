@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import type { AiAction, AiAssistantMode, AiContext } from "../../apps/desktop/src/lib/ai.ts";
+import type { AiAction, AiAssistantMode, AiContext } from "../../apps/desktop/src/lib/ai/ai.ts";
 
 class MemoryStorage {
   private values = new Map<string, string>();
@@ -30,10 +30,11 @@ Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
 });
 
-const { buildSystemPrompt } = await import("../../apps/desktop/src/lib/ai.ts");
+const { buildSystemPrompt } = await import("../../apps/desktop/src/lib/ai/ai.ts");
 
 function baseContext(overrides: Partial<AiContext> = {}): AiContext {
   return {
+    connectionId: "conn-1",
     connectionName: "prod-analytics",
     databaseType: "postgres",
     database: "warehouse",
@@ -67,6 +68,7 @@ function baseContext(overrides: Partial<AiContext> = {}): AiContext {
         ],
       },
     ],
+    sqlFiles: [],
     truncated: false,
     ...overrides,
   };
@@ -86,12 +88,7 @@ const cases: PromptEvalCase[] = [
     name: "agent generate keeps the first SQL block executable and read-oriented",
     action: "generate",
     mode: "agent",
-    mustInclude: [
-      /Agent 模式/,
-      /可直接执行的只读 SQL/,
-      /第一个 ```sql 代码块只能包含最终推荐执行的 SQL/,
-      /不要把解释性 SQL、备选 SQL、危险 SQL 放在第一个代码块/,
-    ],
+    mustInclude: [/Agent 模式/, /execute_query/, /第一个 ```sql 代码块只放最终推荐 SQL/, /只有 SELECT.*WITH.*SHOW.*DESCRIBE.*EXPLAIN.*可以通过 execute_query 执行/],
   },
   {
     name: "ask generate never implies auto execution",
@@ -111,12 +108,7 @@ const cases: PromptEvalCase[] = [
     action: "generate",
     mode: "agent",
     context: { schemaScope: "focused_table" },
-    mustInclude: [
-      /focused table only; not a complete database table list/,
-      /不要直接断言不存在/,
-      /只读元数据查询/,
-      /有哪些表/,
-    ],
+    mustInclude: [/focused table only; not a complete database table list/, /不要直接断言不存在/, /只读元数据查询/, /有哪些表/],
     mustNotInclude: [/Schema context is complete\./],
   },
   {

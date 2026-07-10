@@ -13,7 +13,7 @@ import {
   normalizeSelectionRange,
   parseClipboardTable,
   rowSelectionRange,
-} from "../../apps/desktop/src/lib/gridSelection.ts";
+} from "../../apps/desktop/src/lib/dataGrid/gridSelection.ts";
 
 test("normalizes a dragged cell range in either direction", () => {
   const range = normalizeSelectionRange({ rowIndex: 4, colIndex: 3 }, { rowIndex: 1, colIndex: 0 });
@@ -85,10 +85,7 @@ test("formats selected cells as TSV, CSV, JSON, and SQL values", () => {
   };
 
   assert.equal(formatSelectionAsTsv(selection), 'Ada\tmath\nBob\tquote "here"\nO\'Hara\tNULL');
-  assert.equal(
-    formatSelectionAsCsv(selection),
-    '"name","note"\n"Ada","math"\n"Bob","quote ""here"""\n"O\'Hara","NULL"',
-  );
+  assert.equal(formatSelectionAsCsv(selection), '"name","note"\n"Ada","math"\n"Bob","quote ""here"""\n"O\'Hara","NULL"');
   assert.equal(
     formatSelectionAsJson(selection),
     JSON.stringify(

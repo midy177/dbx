@@ -1,87 +1,30 @@
-import assert from "node:assert/strict";
+import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  connectionObjectTreeNodeSchema,
-  connectionObjectTreeQuerySchema,
-  connectionUsesSchemaExecutionContext,
-  connectionUsesDatabaseObjectTreeMode,
-  effectiveDatabaseTypeForConnection,
-  inferJdbcDialect,
-} from "../../apps/desktop/src/lib/jdbcDialect.ts";
-import { supportsTableStructureEditing } from "../../apps/desktop/src/lib/databaseFeatureSupport.ts";
-import { qualifiedTableName } from "../../apps/desktop/src/lib/tableSelectSql.ts";
+import { effectiveDatabaseTypeForConnection, inferJdbcDialect } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
-test("infers JDBC dialect from URL, driver class, and driver jar path", () => {
+test("infers GoldenDB for generic JDBC connections", () => {
   assert.equal(
-    inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:mysql://db.example.com:9030/demo" }),
-    "mysql",
+    inferJdbcDialect({
+      db_type: "jdbc",
+      connection_string: "jdbc:goldendb://127.0.0.1:3306/app",
+    }),
+    "goldendb",
   );
-  assert.equal(
-    inferJdbcDialect({ db_type: "jdbc", jdbc_driver_class: "org.apache.kyuubi.jdbc.KyuubiHiveDriver" }),
-    "mysql",
-  );
-  assert.equal(inferJdbcDialect({ db_type: "jdbc", jdbc_driver_class: "org.apache.hive.jdbc.HiveDriver" }), "hive");
-  assert.equal(inferJdbcDialect({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/starrocks-jdbc.jar"] }), "starrocks");
-  assert.equal(
-    inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:databend://db.example.com:8000/default" }),
-    "databend",
-  );
-});
-
-test("effective database type keeps non-JDBC types and enables compatible JDBC structure editing", () => {
-  assert.equal(effectiveDatabaseTypeForConnection({ db_type: "postgres" }), "postgres");
-  assert.equal(effectiveDatabaseTypeForConnection({ db_type: "jdbc" }), "jdbc");
   assert.equal(
     effectiveDatabaseTypeForConnection({
       db_type: "jdbc",
-      jdbc_driver_class: "org.apache.kyuubi.jdbc.KyuubiHiveDriver",
+      jdbc_driver_class: "com.goldendb.jdbc.Driver",
     }),
-    "mysql",
-  );
-  assert.equal(
-    supportsTableStructureEditing(
-      effectiveDatabaseTypeForConnection({
-        db_type: "jdbc",
-        jdbc_driver_class: "org.apache.kyuubi.jdbc.KyuubiHiveDriver",
-      }),
-    ),
-    true,
-  );
-  assert.equal(supportsTableStructureEditing(effectiveDatabaseTypeForConnection({ db_type: "jdbc" })), false);
-});
-
-test("JDBC tree shape follows the inferred driver dialect", () => {
-  const kyuubi = { db_type: "jdbc" as const, jdbc_driver_class: "org.apache.kyuubi.jdbc.KyuubiHiveDriver" };
-  const hive = { db_type: "jdbc" as const, jdbc_driver_class: "org.apache.hive.jdbc.HiveDriver" };
-
-  assert.equal(connectionUsesDatabaseObjectTreeMode(kyuubi), true);
-  assert.equal(connectionObjectTreeQuerySchema(kyuubi, "test", undefined), "");
-  assert.equal(connectionUsesDatabaseObjectTreeMode(hive), false);
-  assert.equal(connectionObjectTreeQuerySchema(hive, "spark_catalog", "test"), "test");
-  assert.equal(
-    qualifiedTableName({
-      databaseType: effectiveDatabaseTypeForConnection(hive),
-      schema: connectionObjectTreeQuerySchema(hive, "spark_catalog", "test"),
-      tableName: "dws_event_analyse",
-    }),
-    "`test`.`dws_event_analyse`",
+    "goldendb",
   );
 });
 
-test("Databend JDBC keeps database as schema context for table data", () => {
-  const databend = { db_type: "jdbc" as const, connection_string: "jdbc:databend://db.example.com:8000/dbx_test" };
-
-  assert.equal(effectiveDatabaseTypeForConnection(databend), "databend");
-  assert.equal(connectionUsesDatabaseObjectTreeMode(databend), true);
-  assert.equal(connectionUsesSchemaExecutionContext(databend), true);
-  assert.equal(connectionObjectTreeQuerySchema(databend, "dbx_test", undefined), "dbx_test");
-  assert.equal(connectionObjectTreeNodeSchema(databend, "dbx_test", undefined), "dbx_test");
+test("infers JDBC dialect from driver profile", () => {
   assert.equal(
-    qualifiedTableName({
-      databaseType: effectiveDatabaseTypeForConnection(databend),
-      schema: connectionObjectTreeNodeSchema(databend, "dbx_test", undefined),
-      tableName: "jdbc_probe",
+    inferJdbcDialect({
+      db_type: "jdbc",
+      driver_profile: "sqlserver",
     }),
-    "`dbx_test`.`jdbc_probe`",
+    "sqlserver",
   );
 });

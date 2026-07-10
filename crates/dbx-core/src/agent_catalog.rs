@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::models::connection::DatabaseType;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -18,12 +20,26 @@ pub struct AgentDriverProfile {
 }
 
 const ORACLE_PROFILES: &[AgentDriverProfile] = &[
-    AgentDriverProfile { profile: "oracle-legacy", key: "oracle-legacy", label: "Oracle Legacy", store_visible: true },
-    AgentDriverProfile { profile: "oracle-10g", key: "oracle-10g", label: "Oracle 10g", store_visible: true },
+    AgentDriverProfile { profile: "oracle-legacy", key: "oracle", label: "Oracle", store_visible: false },
+    AgentDriverProfile { profile: "oracle-10g", key: "oracle", label: "Oracle", store_visible: false },
 ];
 
-const GBASE_PROFILES: &[AgentDriverProfile] =
-    &[AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "GBase 8s", store_visible: true }];
+const GBASE_PROFILES: &[AgentDriverProfile] = &[
+    AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "GBase 8s", store_visible: true },
+    AgentDriverProfile { profile: "gbase8a", key: "gbase8a", label: "GBase 8a", store_visible: true },
+];
+
+const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
+    profile: "mongodb-legacy",
+    key: "mongodb",
+    label: "MongoDB (Legacy)",
+    store_visible: false,
+}];
+
+const EXTRA_AGENT_LABELS: &[(&str, &str)] =
+    &[("kafka", "Apache Kafka"), ("sqlserver-legacy", "SQL Server legacy compatibility component")];
+const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] =
+    &[("kafka", "Apache Kafka"), ("sqlserver-legacy", "SQL Server legacy compatibility component")];
 
 const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
@@ -119,8 +135,8 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     },
     AgentCatalogEntry {
         db_type: DatabaseType::Gbase,
-        key: "gbase",
-        label: "GBase",
+        key: "gbase8a",
+        label: "GBase 8a",
         store_visible: true,
         profiles: GBASE_PROFILES,
     },
@@ -149,7 +165,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Trino,
         key: "trino",
-        label: "Trino (Presto)",
+        label: "Trino",
         store_visible: true,
         profiles: &[],
     },
@@ -160,12 +176,26 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         store_visible: true,
         profiles: &[],
     },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Spark,
+        key: "spark",
+        label: "Apache Spark",
+        store_visible: true,
+        profiles: &[],
+    },
     AgentCatalogEntry { db_type: DatabaseType::Db2, key: "db2", label: "IBM DB2", store_visible: true, profiles: &[] },
     AgentCatalogEntry {
         db_type: DatabaseType::Informix,
         key: "informix",
         label: "IBM Informix",
         store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
+        db_type: DatabaseType::InfluxDb,
+        key: "influxdb",
+        label: "InfluxDB",
+        store_visible: false,
         profiles: &[],
     },
     AgentCatalogEntry {
@@ -204,6 +234,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         profiles: &[],
     },
     AgentCatalogEntry {
+        db_type: DatabaseType::Oscar,
+        key: "oscar",
+        label: "神通 OSCAR",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::Yashandb,
         key: "yashandb",
         label: "崖山 YashanDB",
@@ -231,13 +268,20 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         store_visible: true,
         profiles: &[],
     },
-    AgentCatalogEntry { db_type: DatabaseType::Etcd, key: "etcd", label: "etcd", store_visible: false, profiles: &[] },
+    AgentCatalogEntry { db_type: DatabaseType::Etcd, key: "etcd", label: "etcd", store_visible: true, profiles: &[] },
+    AgentCatalogEntry {
+        db_type: DatabaseType::ZooKeeper,
+        key: "zookeeper",
+        label: "Apache ZooKeeper",
+        store_visible: true,
+        profiles: &[],
+    },
     AgentCatalogEntry {
         db_type: DatabaseType::MongoDb,
         key: "mongodb",
         label: "MongoDB (Legacy)",
         store_visible: true,
-        profiles: &[],
+        profiles: MONGODB_PROFILES,
     },
     AgentCatalogEntry {
         db_type: DatabaseType::Iris,
@@ -253,6 +297,14 @@ pub fn entries() -> &'static [AgentCatalogEntry] {
 }
 
 pub fn agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<&'static str> {
+    if *db_type == DatabaseType::MessageQueue {
+        return (driver_profile == Some("kafka")).then_some("kafka");
+    }
+    if *db_type == DatabaseType::SqlServer {
+        return driver_profile
+            .is_some_and(|profile| profile.eq_ignore_ascii_case("sqlserver-legacy"))
+            .then_some("sqlserver-legacy");
+    }
     let entry = entry_for_db_type(db_type)?;
     if let Some(driver_profile) = driver_profile {
         if let Some(profile) = entry.profiles.iter().find(|profile| profile.profile == driver_profile) {
@@ -267,15 +319,26 @@ pub fn is_agent_type(db_type: &DatabaseType) -> bool {
 }
 
 pub fn driver_store_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
-    entries().iter().flat_map(|entry| {
-        let base = entry.store_visible.then_some((entry.key, entry.label));
-        let profiles =
-            entry.profiles.iter().filter(|profile| profile.store_visible).map(|profile| (profile.key, profile.label));
-        base.into_iter().chain(profiles)
-    })
+    let mut seen = HashSet::new();
+    entries()
+        .iter()
+        .flat_map(move |entry| {
+            let base = entry.store_visible.then_some((entry.key, entry.label));
+            let profiles = entry
+                .profiles
+                .iter()
+                .filter(|profile| profile.store_visible)
+                .map(|profile| (profile.key, profile.label));
+            base.into_iter().chain(profiles)
+        })
+        .chain(EXTRA_DRIVER_STORE_ENTRIES.iter().copied())
+        .filter(move |(key, _)| seen.insert(*key))
 }
 
 pub fn label_for_key(agent_key: &str) -> Option<&'static str> {
+    if let Some((_, label)) = EXTRA_AGENT_LABELS.iter().find(|(key, _)| *key == agent_key) {
+        return Some(label);
+    }
     for entry in entries() {
         if entry.key == agent_key {
             return Some(entry.label);

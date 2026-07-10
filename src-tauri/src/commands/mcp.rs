@@ -1,6 +1,6 @@
+#[cfg(not(windows))]
 use std::env;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,13 @@ const SHELL_COMMAND_MARKER: &str = "__DBX_MCP_COMMAND_OUTPUT_START__";
 pub struct McpServerStatus {
     pub installed: bool,
     pub npm_available: bool,
+    pub node_path: Option<String>,
     pub node_version: Option<String>,
     pub current_version: Option<String>,
     pub latest_version: Option<String>,
     pub update_available: bool,
     pub bin_path: Option<String>,
+    pub script_path: Option<String>,
     pub install_command: String,
     pub update_command: String,
     pub error: Option<String>,
@@ -31,11 +33,21 @@ struct NpmLatestPackage {
 
 #[tauri::command]
 pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
-    let npm_available = command_success("npm", &["--version"]);
-    let node_version = command_stdout("node", &["--version"]).ok().and_then(first_non_empty_line);
-    let current_version = if npm_available { installed_mcp_version() } else { None };
-    let bin_path = locate_mcp_bin();
-    let latest_version = fetch_latest_mcp_version().await.ok();
+    let local_status = tauri::async_runtime::spawn_blocking(|| {
+        let npm_available = command_success("npm", &["--version"]);
+        let node_path = locate_command("node");
+        let node_command = node_path.as_deref().unwrap_or("node");
+        let node_version = command_stdout(node_command, &["--version"]).ok().and_then(first_non_empty_line);
+        let current_version = if npm_available { installed_mcp_version() } else { None };
+        let bin_path = locate_mcp_bin();
+        let script_path = if npm_available { installed_mcp_bin_script() } else { None };
+        (npm_available, node_path, node_version, current_version, bin_path, script_path)
+    });
+    let latest_version = fetch_latest_mcp_version();
+    let (local_status, latest_version) = tokio::join!(local_status, latest_version);
+    let (npm_available, node_path, node_version, current_version, bin_path, script_path) =
+        local_status.map_err(|err| err.to_string())?;
+    let latest_version = latest_version.ok();
     let update_available = current_version
         .as_deref()
         .zip(latest_version.as_deref())
@@ -43,22 +55,46 @@ pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
     let error = if npm_available { None } else { Some("npm is not available in PATH.".to_string()) };
 
     Ok(McpServerStatus {
-        installed: current_version.is_some() || bin_path.is_some(),
+        installed: current_version.is_some() || bin_path.is_some() || script_path.is_some(),
         npm_available,
+        node_path,
         node_version,
         current_version,
         latest_version,
         update_available,
         bin_path,
+        script_path,
         install_command: MCP_INSTALL_COMMAND.to_string(),
         update_command: MCP_INSTALL_COMMAND.to_string(),
         error,
     })
 }
 
+#[tauri::command]
+pub async fn install_mcp_server() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let output = command_output(
+            "npm",
+            &["install", "-g", "@dbx-app/mcp-server@latest", "--registry=https://registry.npmjs.org"],
+        )?;
+
+        if !output.success {
+            let error_msg = if !output.stderr.is_empty() { output.stderr } else { output.stdout };
+            return Err(format!("Installation failed: {}", error_msg));
+        }
+
+        let version = installed_mcp_version().unwrap_or_else(|| "unknown".to_string());
+        Ok(format!("Successfully installed @dbx-app/mcp-server@{}", version))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 async fn fetch_latest_mcp_version() -> Result<String, String> {
     let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10)).user_agent("dbx-mcp-status-checker");
-    if let Some(proxy_url) = dbx_core::update::system_proxy_url() {
+    let proxy_url =
+        tauri::async_runtime::spawn_blocking(dbx_core::update::system_proxy_url).await.map_err(|e| e.to_string())?;
+    if let Some(proxy_url) = proxy_url {
         let proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| format!("Invalid system proxy URL: {e}"))?;
         builder = builder.proxy(proxy);
     }
@@ -76,20 +112,86 @@ async fn fetch_latest_mcp_version() -> Result<String, String> {
 }
 
 fn installed_mcp_version() -> Option<String> {
-    let stdout = command_stdout("npm", &["list", "-g", MCP_PACKAGE_NAME, "--json", "--depth=0"]).ok()?;
-    let value = serde_json::from_str::<serde_json::Value>(&stdout).ok()?;
-    value
-        .get("dependencies")
-        .and_then(|dependencies| dependencies.get(MCP_PACKAGE_NAME))
-        .and_then(|package| package.get("version"))
-        .and_then(|version| version.as_str())
-        .map(ToOwned::to_owned)
+    let root = command_stdout("npm", &["root", "-g"]).ok()?;
+    let pkg_json_path = Path::new(root.trim()).join(MCP_PACKAGE_NAME).join("package.json");
+    let content = std::fs::read_to_string(pkg_json_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value.get("version")?.as_str().map(ToOwned::to_owned)
+}
+
+pub(crate) fn resolve_mcp_server_command() -> Option<(String, Vec<String>)> {
+    #[cfg(windows)]
+    {
+        // Node.js 18.20.2+ rejects direct spawn of .cmd/.bat files without a shell
+        // on Windows. Prefer the package's real JS entry point for Codex CLI.
+        return installed_mcp_bin_script()
+            .map(|script| (locate_command("node").unwrap_or_else(|| "node".to_string()), vec![script]))
+            .or_else(|| locate_mcp_bin().map(|path| (path, Vec::new())));
+    }
+
+    #[cfg(not(windows))]
+    {
+        locate_mcp_bin()
+            .map(|path| (path, Vec::new()))
+            .or_else(|| installed_mcp_bin_script().map(|script| ("node".to_string(), vec![script])))
+    }
+}
+
+pub(crate) fn locate_command(command: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        return locate_windows_command(command);
+    }
+    #[cfg(not(windows))]
+    {
+        command_stdout("which", &[command]).ok().and_then(first_non_empty_line)
+    }
 }
 
 fn locate_mcp_bin() -> Option<String> {
-    let (command, args): (&str, &[&str]) =
-        if cfg!(windows) { ("where", &["dbx-mcp-server"]) } else { ("which", &["dbx-mcp-server"]) };
-    command_stdout(command, args).ok().and_then(first_non_empty_line)
+    locate_command("dbx-mcp-server")
+}
+
+fn installed_mcp_bin_script() -> Option<String> {
+    let root = command_stdout("npm", &["root", "-g"]).ok()?;
+    let script = Path::new(root.trim()).join(MCP_PACKAGE_NAME).join("dist").join("index.js");
+    script.is_file().then(|| script.to_string_lossy().to_string())
+}
+
+#[cfg(windows)]
+fn locate_windows_command(command: &str) -> Option<String> {
+    command_stdout("where", &[command])
+        .ok()
+        .and_then(first_windows_command_path)
+        .or_else(|| {
+            let script =
+                format!("(Get-Command -All {} -ErrorAction SilentlyContinue).Source", windows_shell_quote(command));
+            command_stdout("powershell.exe", &["-NoProfile", "-Command", &script])
+                .ok()
+                .and_then(first_windows_command_path)
+        })
+        .or_else(|| {
+            windows_command_candidates(command)
+                .into_iter()
+                .find(|candidate| is_windows_launchable_command(candidate) && Path::new(candidate).is_file())
+        })
+}
+
+#[cfg(windows)]
+fn first_windows_command_path(value: String) -> Option<String> {
+    let paths = value.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>();
+    paths
+        .into_iter()
+        .find(|path| is_windows_launchable_command(path) && Path::new(path).is_file())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(windows)]
+fn is_windows_launchable_command(path: &str) -> bool {
+    matches!(
+        Path::new(path).extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase).as_deref(),
+        Some("exe" | "cmd" | "bat" | "com")
+    )
 }
 
 fn command_success(command: &str, args: &[&str]) -> bool {
@@ -121,11 +223,21 @@ fn command_output(command: &str, args: &[&str]) -> Result<CommandOutput, String>
         return direct;
     }
 
-    run_command_through_user_shell(command, args).or(direct)
+    #[cfg(windows)]
+    {
+        return run_windows_command_candidates(command, args).or(direct);
+    }
+
+    #[cfg(not(windows))]
+    {
+        run_command_through_user_shell(command, args).or(direct)
+    }
 }
 
 fn run_command(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
-    let output = Command::new(command).args(args).output().map_err(|e| e.to_string())?;
+    let mut cmd = dbx_core::process::new_std_command(command);
+    cmd.args(args);
+    let output = cmd.output().map_err(|e| e.to_string())?;
     Ok(CommandOutput {
         success: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -134,8 +246,70 @@ fn run_command(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
 }
 
 #[cfg(windows)]
-fn run_command_through_user_shell(_command: &str, _args: &[&str]) -> Result<CommandOutput, String> {
-    Err("User shell fallback is not available on Windows.".to_string())
+fn run_windows_command_candidates(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
+    for candidate in windows_command_candidates(command) {
+        let output = run_command(&candidate, args);
+        if output.as_ref().is_ok_and(|output| output.success) {
+            return output;
+        }
+    }
+    run_command_through_user_shell(command, args)
+}
+
+#[cfg(windows)]
+fn windows_command_candidates(command: &str) -> Vec<String> {
+    if Path::new(command).extension().is_some() {
+        return Vec::new();
+    }
+    let names = ["cmd", "exe", "bat", "com", "ps1"].iter().map(|extension| format!("{command}.{extension}"));
+    names
+        .clone()
+        .chain(
+            windows_common_command_dirs()
+                .into_iter()
+                .flat_map(|dir| names.clone().map(move |name| dir.join(name).to_string_lossy().to_string())),
+        )
+        .collect()
+}
+
+#[cfg(windows)]
+fn windows_common_command_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
+        dirs.push(nvm_symlink.into());
+    }
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        dirs.push(std::path::PathBuf::from(app_data).join("npm"));
+    }
+    if let Ok(program_files) = std::env::var("ProgramFiles") {
+        dirs.push(std::path::PathBuf::from(program_files).join("nodejs"));
+    }
+    if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+        dirs.push(std::path::PathBuf::from(program_files_x86).join("nodejs"));
+    }
+    dirs.push(std::path::PathBuf::from(r"C:\nvm4w\nodejs"));
+    dirs
+}
+
+#[cfg(windows)]
+fn run_command_through_user_shell(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
+    let script = windows_command_script(command, args);
+    let mut output = run_command("powershell.exe", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])?;
+    output.stdout = stdout_after_shell_marker(&output.stdout);
+    Ok(output)
+}
+
+#[cfg(windows)]
+fn windows_command_script(command: &str, args: &[&str]) -> String {
+    let mut words = Vec::with_capacity(args.len() + 1);
+    words.push(windows_shell_quote(command));
+    words.extend(args.iter().map(|arg| windows_shell_quote(arg)));
+    format!("Write-Output {}; & {}", windows_shell_quote(SHELL_COMMAND_MARKER), words.join(" "))
+}
+
+#[cfg(windows)]
+fn windows_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(not(windows))]
@@ -186,6 +360,7 @@ fn default_user_shell() -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn shell_command_script(command: &str, args: &[&str]) -> String {
     let mut words = Vec::with_capacity(args.len() + 1);
     words.push(shell_quote(command));
@@ -193,6 +368,7 @@ fn shell_command_script(command: &str, args: &[&str]) -> String {
     format!("printf '%s\\n' {}; {}", shell_quote(SHELL_COMMAND_MARKER), words.join(" "))
 }
 
+#[cfg(not(windows))]
 fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -209,10 +385,15 @@ fn stdout_after_shell_marker(stdout: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bash_login_script, shell_command_script, shell_quote, stdout_after_shell_marker, SHELL_COMMAND_MARKER,
-    };
+    #[cfg(not(windows))]
+    use super::bash_login_script;
+    #[cfg(windows)]
+    use super::first_windows_command_path;
+    #[cfg(not(windows))]
+    use super::{shell_command_script, shell_quote};
+    use super::{stdout_after_shell_marker, SHELL_COMMAND_MARKER};
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_quote_handles_empty_and_single_quotes() {
         assert_eq!(shell_quote(""), "''");
@@ -220,6 +401,7 @@ mod tests {
         assert_eq!(shell_quote("can't"), "'can'\"'\"'t'");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn shell_command_script_marks_command_output_after_startup_noise() {
         let script = shell_command_script("npm", &["list", "-g", "@dbx-app/mcp-server", "--json"]);
@@ -228,6 +410,7 @@ mod tests {
         assert!(script.contains("'@dbx-app/mcp-server'"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn bash_login_script_sources_profile_and_rc_files() {
         let script = bash_login_script("node --version");
@@ -242,5 +425,39 @@ mod tests {
         let stdout = format!("loading profile\n{SHELL_COMMAND_MARKER}\n22.19.0\n");
 
         assert_eq!(stdout_after_shell_marker(&stdout), "22.19.0\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_lookup_prefers_cmd_over_extensionless_shim() {
+        let dir = std::env::temp_dir().join(format!("dbx-mcp-command-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let extensionless = dir.join("codex");
+        let cmd = dir.join("codex.cmd");
+        std::fs::write(&extensionless, "#!/bin/sh\n").unwrap();
+        std::fs::write(&cmd, "@echo off\n").unwrap();
+
+        let output = format!("{}\n{}\n", extensionless.display(), cmd.display());
+        let resolved = first_windows_command_path(output).unwrap();
+
+        assert_eq!(resolved, cmd.to_string_lossy().as_ref());
+        let _ = std::fs::remove_file(extensionless);
+        let _ = std::fs::remove_file(cmd);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_lookup_rejects_extensionless_only_shim() {
+        let dir = std::env::temp_dir().join(format!("dbx-mcp-command-extensionless-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let extensionless = dir.join("codex");
+        std::fs::write(&extensionless, "#!/bin/sh\n").unwrap();
+
+        let resolved = first_windows_command_path(extensionless.display().to_string());
+
+        assert!(resolved.is_none());
+        let _ = std::fs::remove_file(extensionless);
+        let _ = std::fs::remove_dir(dir);
     }
 }

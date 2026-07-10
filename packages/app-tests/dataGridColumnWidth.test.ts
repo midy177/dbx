@@ -1,21 +1,33 @@
-import { strict as assert } from "node:assert";
-import { test } from "vitest";
-import { calculateDataGridColumnWidth, DATA_GRID_HEADER_CONTROL_WIDTH } from "../../apps/desktop/src/lib/dataGridColumnWidth.ts";
+import { expect, test } from "vitest";
+import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MAX_WIDTH } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnWidth.ts";
 
-test("reserves header control space when auto-sizing a column from the header", () => {
+test("default data grid column width remains compact for long values", () => {
   const width = calculateDataGridColumnWidth({
-    columnName: "created_at",
-    sampleValues: [],
+    columnName: "description",
+    sampleValues: ["x".repeat(120)],
   });
 
-  assert.equal(width, "created_at".length * 8 + DATA_GRID_HEADER_CONTROL_WIDTH);
+  expect(width).toBe(DATA_GRID_COL_MAX_WIDTH);
 });
 
-test("keeps cell content as the sizing driver when it is wider than header controls", () => {
+test("auto-fit data grid column width expands long values beyond default width", () => {
   const width = calculateDataGridColumnWidth({
-    columnName: "id",
-    sampleValues: ["a long enough value to dominate"],
+    columnName: "description",
+    sampleValues: ["x".repeat(120)],
+    maxWidth: DATA_GRID_COL_AUTO_FIT_MAX_WIDTH,
+    valueTextLimit: DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT,
   });
 
-  assert.equal(width, "a long enough value to dominate".length * 8 + 28);
+  expect(width).toBeGreaterThan(DATA_GRID_COL_MAX_WIDTH);
+});
+
+test("auto-fit data grid column width stays bounded for very long values", () => {
+  const width = calculateDataGridColumnWidth({
+    columnName: "description",
+    sampleValues: ["x".repeat(1000)],
+    maxWidth: DATA_GRID_COL_AUTO_FIT_MAX_WIDTH,
+    valueTextLimit: DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT,
+  });
+
+  expect(width).toBe(DATA_GRID_COL_AUTO_FIT_MAX_WIDTH);
 });

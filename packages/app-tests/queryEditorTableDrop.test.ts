@@ -10,7 +10,7 @@ import {
   serializeTableReferencePayload,
   setActiveTableReferencePayload,
   tableReferenceInsertText,
-} from "../../apps/desktop/src/lib/queryEditorTableDrop.ts";
+} from "../../apps/desktop/src/lib/editor/queryEditorTableDrop.ts";
 
 test("creates table drag payload only when table context is complete", () => {
   assert.equal(createTableReferencePayload({ connectionId: "c1", database: "db" }), null);
@@ -48,6 +48,29 @@ test("creates table drag payload only when table context is complete", () => {
   );
 });
 
+test("creates column drag payload when column context is complete", () => {
+  assert.deepEqual(
+    createTableReferencePayload({
+      connectionId: "c1",
+      database: "db",
+      schema: "public",
+      tableName: "users",
+      columnName: "user_id",
+      databaseType: "postgres",
+    }),
+    {
+      kind: "dbx-table-reference",
+      connectionId: "c1",
+      database: "db",
+      schema: "public",
+      tableName: "users",
+      columnName: "user_id",
+      referenceType: "column",
+      databaseType: "postgres",
+    },
+  );
+});
+
 test("round trips table drag payload and rejects unrelated data", () => {
   const payload = createTableReferencePayload({
     connectionId: "c1",
@@ -75,6 +98,18 @@ test("round trips table drag payload and rejects unrelated data", () => {
   );
   assert.equal(parseTableReferencePayload("not json"), null);
   assert.equal(parseTableReferencePayload(JSON.stringify({ kind: "dbx-table-reference", tableName: "orders" })), null);
+  assert.equal(
+    parseTableReferencePayload(
+      JSON.stringify({
+        kind: "dbx-table-reference",
+        connectionId: "c1",
+        database: "db",
+        tableName: "orders",
+        referenceType: "column",
+      }),
+    ),
+    null,
+  );
 });
 
 test("tracks the active in-app table drag payload without dataTransfer reads", () => {
@@ -130,5 +165,20 @@ test("formats dropped table reference for the source database type", () => {
       databaseType: "mysql",
     }),
     "`order-detail`",
+  );
+});
+
+test("formats dropped column references for the source database type", () => {
+  assert.equal(
+    tableReferenceInsertText({
+      kind: "dbx-table-reference",
+      connectionId: "c1",
+      database: "db",
+      tableName: "users",
+      columnName: "display name",
+      referenceType: "column",
+      databaseType: "postgres",
+    }),
+    '"display name"',
   );
 });

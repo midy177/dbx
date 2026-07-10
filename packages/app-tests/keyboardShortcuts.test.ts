@@ -5,21 +5,28 @@ import {
   isBrowserReloadShortcut,
   isCancelSearchShortcut,
   isCloseTabShortcut,
+  isCopySidebarSelectionShortcut,
   isExecuteSqlShortcut,
+  isEditSidebarConnectionShortcut,
   isFocusSearchShortcut,
   isModRShortcut,
   isNewQueryShortcut,
   isObjectSourceSaveShortcutTarget,
+  isOpenSettingsShortcut,
+  isPasteSidebarSelectionShortcut,
   isResetZoomShortcut,
   isRefreshDataShortcut,
   isSaveShortcut,
+  isSwitchToNextTabShortcut,
+  isSwitchToPreviousTabShortcut,
   isCopyCurrentRowShortcut,
   isDeleteCurrentRowShortcut,
   isToggleTransposeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
-} from "../../apps/desktop/src/lib/keyboardShortcuts.ts";
-import { shortcutToCodeMirrorKey } from "../../apps/desktop/src/lib/shortcutRegistry.ts";
+  switchToTabIndexFromShortcut,
+} from "../../apps/desktop/src/lib/editor/keyboardShortcuts.ts";
+import { shortcutToCodeMirrorKey } from "../../apps/desktop/src/lib/editor/shortcutRegistry.ts";
 
 test("matches Cmd+Enter for SQL execution", () => {
   assert.equal(isExecuteSqlShortcut({ key: "Enter", metaKey: true }), true);
@@ -57,10 +64,57 @@ test("matches Cmd+T for opening a new query", () => {
   assert.equal(isNewQueryShortcut({ key: "t", metaKey: true }), true);
 });
 
+test("matches Shift+Mod+brackets for switching adjacent tabs", () => {
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "[", metaKey: true, shiftKey: true }), true);
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "[", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isSwitchToNextTabShortcut({ key: "]", metaKey: true, shiftKey: true }), true);
+  assert.equal(isSwitchToNextTabShortcut({ key: "]", ctrlKey: true, shiftKey: true }), true);
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "[", metaKey: true }), false);
+  assert.equal(isSwitchToNextTabShortcut({ key: "]", metaKey: true }), false);
+});
+
+test("matches Mod+number for switching to numbered tabs", () => {
+  assert.equal(switchToTabIndexFromShortcut({ key: "1", metaKey: true }), 0);
+  assert.equal(switchToTabIndexFromShortcut({ key: "5", ctrlKey: true }), 4);
+  assert.equal(switchToTabIndexFromShortcut({ key: "9", metaKey: true }), 8);
+  assert.equal(switchToTabIndexFromShortcut({ key: "0", metaKey: true }), null);
+  assert.equal(switchToTabIndexFromShortcut({ key: "1", metaKey: true, altKey: true }), null);
+});
+
+test("matches custom shortcut settings for tab switching", () => {
+  const shortcuts = {
+    switchToPreviousTab: "Alt+ArrowLeft",
+    switchToNextTab: "Alt+ArrowRight",
+    switchToTab3: "Shift+Mod+3",
+  } as any;
+
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "[", metaKey: true }, shortcuts), false);
+  assert.equal(isSwitchToPreviousTabShortcut({ key: "ArrowLeft", altKey: true }, shortcuts), true);
+  assert.equal(isSwitchToNextTabShortcut({ key: "ArrowRight", altKey: true }, shortcuts), true);
+  assert.equal(switchToTabIndexFromShortcut({ key: "3", metaKey: true }, shortcuts), null);
+  assert.equal(switchToTabIndexFromShortcut({ key: "3", metaKey: true, shiftKey: true }, shortcuts), 2);
+});
+
 test("matches custom shortcut settings for opening a new query", () => {
   assert.equal(isNewQueryShortcut({ key: "t", metaKey: true }, { newQuery: "Shift+Mod+N" } as any), false);
+  assert.equal(isNewQueryShortcut({ key: "n", ctrlKey: true, shiftKey: true } as any, { newQuery: "Shift+Mod+N" } as any), true);
+});
+
+test("matches Mod+Comma for opening settings", () => {
+  assert.equal(isOpenSettingsShortcut({ key: ",", metaKey: true }), true);
+  assert.equal(isOpenSettingsShortcut({ key: ",", ctrlKey: true }), true);
+  assert.equal(isOpenSettingsShortcut({ key: ",", altKey: true }), false);
+});
+
+test("matches custom shortcut settings for opening settings", () => {
+  assert.equal(isOpenSettingsShortcut({ key: ",", metaKey: true }, { openSettings: "Shift+Mod+P" } as any), false);
   assert.equal(
-    isNewQueryShortcut({ key: "n", ctrlKey: true, shiftKey: true } as any, { newQuery: "Shift+Mod+N" } as any),
+    isOpenSettingsShortcut(
+      { key: "p", ctrlKey: true, shiftKey: true } as any,
+      {
+        openSettings: "Shift+Mod+P",
+      } as any,
+    ),
     true,
   );
 });
@@ -101,10 +155,7 @@ test("matches configurable shortcut for toggling transpose view", () => {
 
 test("matches custom shortcut settings for refreshing data", () => {
   assert.equal(isRefreshDataShortcut({ key: "F5" }, { refreshData: "Shift+Mod+R" } as any), false);
-  assert.equal(
-    isRefreshDataShortcut({ key: "r", metaKey: true, shiftKey: true } as any, { refreshData: "Shift+Mod+R" } as any),
-    true,
-  );
+  assert.equal(isRefreshDataShortcut({ key: "r", metaKey: true, shiftKey: true } as any, { refreshData: "Shift+Mod+R" } as any), true);
 });
 
 test("detects browser reload shortcuts for desktop suppression", () => {
@@ -177,8 +228,7 @@ test("ignores Alt+S for saving", () => {
 
 test("detects object source editor targets for contextual save", () => {
   const target = {
-    closest: (selector: string) =>
-      selector === "[data-object-source-editor], [data-object-source-preview]" ? {} : null,
+    closest: (selector: string) => (selector === "[data-object-source-editor], [data-object-source-preview]" ? {} : null),
   };
 
   assert.equal(isObjectSourceSaveShortcutTarget(target), true);
@@ -198,4 +248,22 @@ test("matches Escape for cancelling search", () => {
 
 test("ignores cancelling search while composing", () => {
   assert.equal(isCancelSearchShortcut({ key: "Escape", isComposing: true }), false);
+});
+
+test("matches configurable sidebar shortcuts", () => {
+  assert.equal(isCopySidebarSelectionShortcut({ key: "c", metaKey: true }), true);
+  assert.equal(isPasteSidebarSelectionShortcut({ key: "v", ctrlKey: true }), true);
+  assert.equal(isEditSidebarConnectionShortcut({ key: "e", metaKey: true }), true);
+
+  const shortcuts = {
+    copySidebarSelection: "Alt+C",
+    pasteSidebarSelection: "Alt+V",
+    editSidebarConnection: "Shift+Mod+E",
+  } as any;
+
+  assert.equal(isCopySidebarSelectionShortcut({ key: "c", metaKey: true }, shortcuts), false);
+  assert.equal(isCopySidebarSelectionShortcut({ key: "c", altKey: true }, shortcuts), true);
+  assert.equal(isPasteSidebarSelectionShortcut({ key: "v", altKey: true }, shortcuts), true);
+  assert.equal(isEditSidebarConnectionShortcut({ key: "e", metaKey: true }, shortcuts), false);
+  assert.equal(isEditSidebarConnectionShortcut({ key: "e", ctrlKey: true, shiftKey: true }, shortcuts), true);
 });

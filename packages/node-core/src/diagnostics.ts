@@ -2,18 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import { bridgePortFilePath, dbPath, appDataDir } from "./paths.js";
 import { inspectConnectionStore } from "./connections.js";
 
-export const DIRECT_QUERY_TYPES = [
-  "postgres",
-  "redshift",
-  "mysql",
-  "doris",
-  "starrocks",
-  "sqlite",
-  "rqlite",
-  "gaussdb",
-  "kwdb",
-  "opengauss",
-] as const;
+export const DIRECT_QUERY_TYPES = ["postgres", "redshift", "mysql", "doris", "starrocks", "manticoresearch", "sqlite", "rqlite", "kwdb", "questdb"] as const;
 
 export type DirectQueryType = (typeof DIRECT_QUERY_TYPES)[number];
 
@@ -31,12 +20,18 @@ export const BRIDGE_REQUIRED_TYPES = [
   "sqlserver",
   "oracle",
   "elasticsearch",
+  "qdrant",
+  "milvus",
+  "weaviate",
+  "chromadb",
+  "etcd",
   "dameng",
   "kingbase",
   "highgo",
   "vastbase",
   "goldendb",
   "databend",
+  "gaussdb",
   "yashandb",
   "databricks",
   "saphana",
@@ -44,6 +39,7 @@ export const BRIDGE_REQUIRED_TYPES = [
   "vertica",
   "firebird",
   "exasol",
+  "opengauss",
   "oceanbase-oracle",
   "gbase",
   "tdengine",
@@ -51,7 +47,9 @@ export const BRIDGE_REQUIRED_TYPES = [
   "h2",
   "snowflake",
   "trino",
+  "prestosql",
   "hive",
+  "spark",
   "db2",
   "informix",
   "iris",
@@ -60,9 +58,12 @@ export const BRIDGE_REQUIRED_TYPES = [
   "bigquery",
   "kylin",
   "sundb",
+  "oscar",
   "xugu",
   "jdbc",
   "access",
+  "influxdb",
+  "zookeeper",
 ] as const;
 
 export interface DbxDiagnostics {
@@ -104,9 +105,7 @@ export async function getDbxDiagnostics(): Promise<DbxDiagnostics> {
     loadConnectionsOk: connectionStore.loadConnectionsOk,
     loadedConnectionCount: connectionStore.loadedConnectionCount,
     loadConnectionsError: connectionStore.loadConnectionsError,
-    loadConnectionsHint: connectionStore.loadConnectionsError
-      ? connectionStoreHint(connectionStore.loadConnectionsError)
-      : undefined,
+    loadConnectionsHint: connectionStore.loadConnectionsError ? connectionStoreHint(connectionStore.loadConnectionsError) : undefined,
     bridgePortFile: portFile,
     bridgePortFileExists,
     bridgeUrl,

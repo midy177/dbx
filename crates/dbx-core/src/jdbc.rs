@@ -1,17 +1,57 @@
+use crate::agent_service::AgentProgressEvent;
+use crate::plugins::PluginRuntimeEnv;
 use crate::plugins::{PluginManifest, SUPPORTED_PLUGIN_PROTOCOL_VERSION};
 use crate::update::{fetch_latest_release, is_newer_version, JdbcPluginLatest};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const JDBC_PLUGIN_DOWNLOAD_URL: &str =
     "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
 const JDBC_PLUGIN_R2_PATH: &str = "releases/latest/dbx-jdbc-plugin-latest.zip";
+pub const PRESTOSQL_JDBC_DRIVER_VERSION: &str = "350";
+pub const PRESTOSQL_JDBC_DRIVER_COORDINATE: &str = "io.prestosql:presto-jdbc:350";
+pub const PRESTOSQL_JDBC_DRIVER_REPOSITORY: &str = "https://repo.maven.apache.org/maven2/";
+const PRESTOSQL_JDBC_DRIVER_URL: &str =
+    "https://repo.maven.apache.org/maven2/io/prestosql/presto-jdbc/350/presto-jdbc-350.jar";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JdbcDriverInfo {
     pub name: String,
     pub path: String,
     pub size: u64,
+    pub bundle_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JdbcMavenInstallRequest {
+    pub coordinate: String,
+    #[serde(default)]
+    pub repositories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JdbcMavenBundleInfo {
+    pub id: String,
+    pub coordinate: String,
+    pub scope: String,
+    pub repositories: Vec<String>,
+    pub installed_at: String,
+    pub path: String,
+    pub artifacts: Vec<JdbcMavenArtifactInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JdbcMavenArtifactInfo {
+    pub group_id: String,
+    pub artifact_id: String,
+    pub version: String,
+    pub classifier: String,
+    pub extension: String,
+    pub file_name: String,
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +70,10 @@ pub struct JdbcPluginStatus {
 
 pub fn list_jdbc_drivers(plugins_root: &Path) -> Result<Vec<JdbcDriverInfo>, String> {
     list_jdbc_drivers_from_dir(&jdbc_drivers_dir(plugins_root))
+}
+
+pub fn list_jdbc_maven_bundles(plugins_root: &Path) -> Result<Vec<JdbcMavenBundleInfo>, String> {
+    list_jdbc_maven_bundles_from_dir(&jdbc_maven_drivers_dir(plugins_root))
 }
 
 pub fn import_jdbc_drivers(plugins_root: &Path, paths: &[String]) -> Result<Vec<JdbcDriverInfo>, String> {
@@ -70,6 +114,110 @@ pub fn delete_jdbc_driver(plugins_root: &Path, path: &str) -> Result<Vec<JdbcDri
     list_jdbc_drivers_from_dir(&drivers_dir)
 }
 
+pub fn delete_jdbc_maven_bundle(plugins_root: &Path, bundle_id: &str) -> Result<Vec<JdbcDriverInfo>, String> {
+    if !is_safe_bundle_id(bundle_id) {
+        return Err("Invalid JDBC Maven bundle id".to_string());
+    }
+    let bundles_dir = jdbc_maven_drivers_dir(plugins_root);
+    let target = bundles_dir.join(bundle_id);
+    if target.exists() {
+        std::fs::remove_dir_all(&target).map_err(|err| err.to_string())?;
+    }
+    list_jdbc_drivers(plugins_root)
+}
+
+pub async fn install_jdbc_driver_from_maven(
+    plugins_root: &Path,
+    request: JdbcMavenInstallRequest,
+    env: PluginRuntimeEnv,
+) -> Result<Vec<JdbcDriverInfo>, String> {
+    let coordinate = request.coordinate.trim().to_string();
+    if coordinate.is_empty() {
+        return Err("Maven coordinate is required".to_string());
+    }
+    let plugin_dir = plugins_root.join("jdbc");
+    let resolver = jdbc_maven_resolver_executable(&plugin_dir);
+    if !resolver.exists() {
+        return Err("JDBC Maven resolver is not installed. Update or reinstall the JDBC plugin.".to_string());
+    }
+
+    let mut repositories = if request.repositories.is_empty() {
+        vec!["https://repo.maven.apache.org/maven2/".to_string()]
+    } else {
+        request.repositories.into_iter().map(|repo| repo.trim().to_string()).filter(|repo| !repo.is_empty()).collect()
+    };
+    if repositories.is_empty() {
+        repositories.push("https://repo.maven.apache.org/maven2/".to_string());
+    }
+    let local_repo = plugin_dir.join("maven-cache");
+    std::fs::create_dir_all(&local_repo).map_err(|err| err.to_string())?;
+
+    let mut command = crate::process::new_tokio_command(&resolver);
+    env.apply_to(&mut command);
+    command.arg("resolve").arg("--coordinate").arg(&coordinate).arg("--local-repo").arg(&local_repo);
+    for repo in &repositories {
+        command.arg("--repo").arg(repo);
+    }
+    let output = command.output().await.map_err(|err| format!("Failed to run JDBC Maven resolver: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() { "JDBC Maven resolver failed".to_string() } else { stderr });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let resolved: MavenResolveOutput =
+        serde_json::from_str(&stdout).map_err(|err| format!("Failed to parse JDBC Maven resolver output: {err}"))?;
+    let root = plugins_root.to_path_buf();
+    tokio::task::spawn_blocking(move || install_jdbc_maven_bundle(&root, &coordinate, &resolved))
+        .await
+        .map_err(|err| err.to_string())??;
+    list_jdbc_drivers(plugins_root)
+}
+
+pub async fn install_prestosql_jdbc_driver(plugins_root: &Path) -> Result<Vec<JdbcDriverInfo>, String> {
+    let plugin_dir = plugins_root.join("jdbc");
+    let temp_dir = plugin_dir.join("downloads");
+    std::fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let temp_file = temp_dir.join("presto-jdbc-350.jar.tmp");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|err| err.to_string())?;
+    let mut resp = client
+        .get(PRESTOSQL_JDBC_DRIVER_URL)
+        .header(reqwest::header::USER_AGENT, "dbx-prestosql-driver-installer")
+        .send()
+        .await
+        .and_then(|resp| resp.error_for_status())
+        .map_err(|err| format!("Failed to download PrestoSQL JDBC driver: {err}"))?;
+    let mut file = std::fs::File::create(&temp_file)
+        .map_err(|err| format!("Failed to create PrestoSQL JDBC driver temp file: {err}"))?;
+    while let Some(chunk) = resp.chunk().await.map_err(|err| format!("Download stream error: {err}"))? {
+        std::io::Write::write_all(&mut file, &chunk).map_err(|err| format!("Failed to write chunk: {err}"))?;
+    }
+    std::io::Write::flush(&mut file).map_err(|err| format!("Failed to flush temp file: {err}"))?;
+    drop(file);
+
+    let root = plugins_root.to_path_buf();
+    let repositories = vec![PRESTOSQL_JDBC_DRIVER_REPOSITORY.to_string()];
+    tokio::task::spawn_blocking(move || {
+        install_single_jdbc_maven_artifact(
+            &root,
+            PRESTOSQL_JDBC_DRIVER_COORDINATE,
+            "io.prestosql",
+            "presto-jdbc",
+            PRESTOSQL_JDBC_DRIVER_VERSION,
+            &temp_file,
+            &repositories,
+        )?;
+        let _ = std::fs::remove_file(&temp_file);
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+    list_jdbc_drivers(plugins_root)
+}
+
 // ---- JDBC Plugin ----
 
 pub async fn get_jdbc_plugin_status(plugins_root: &Path) -> Result<JdbcPluginStatus, String> {
@@ -77,17 +225,36 @@ pub async fn get_jdbc_plugin_status(plugins_root: &Path) -> Result<JdbcPluginSta
 }
 
 pub async fn install_jdbc_plugin(plugins_root: &Path) -> Result<JdbcPluginStatus, String> {
-    let bytes = download_jdbc_plugin_zip().await?;
+    install_jdbc_plugin_with_progress(plugins_root, |_| {}).await
+}
+
+pub async fn install_jdbc_plugin_with_progress(
+    plugins_root: &Path,
+    progress: impl Fn(AgentProgressEvent),
+) -> Result<JdbcPluginStatus, String> {
+    let bytes = download_jdbc_plugin_zip_with_progress(&progress).await?;
     let plugin_dir = plugins_root.join("jdbc");
-    install_jdbc_plugin_zip(&bytes, &plugin_dir)?;
-    jdbc_plugin_status_from_dir(&plugin_dir).await
+    let status_dir = plugin_dir.clone();
+    progress(AgentProgressEvent::transfer("jdbc-plugin-extract", 0, 0));
+    tokio::task::spawn_blocking(move || install_jdbc_plugin_zip(&bytes, &plugin_dir))
+        .await
+        .map_err(|err| err.to_string())??;
+    let status = jdbc_plugin_status_from_dir(&status_dir).await;
+    progress(AgentProgressEvent::step("done"));
+    status
 }
 
 pub async fn install_jdbc_plugin_from_file(plugins_root: &Path, file_path: &str) -> Result<JdbcPluginStatus, String> {
-    let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
     let plugin_dir = plugins_root.join("jdbc");
-    install_jdbc_plugin_zip(&bytes, &plugin_dir)?;
-    jdbc_plugin_status_from_dir(&plugin_dir).await
+    let status_dir = plugin_dir.clone();
+    let file_path = file_path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+        install_jdbc_plugin_zip(&bytes, &plugin_dir)
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+    jdbc_plugin_status_from_dir(&status_dir).await
 }
 
 pub fn uninstall_jdbc_plugin(plugins_root: &Path) -> Result<JdbcPluginStatus, String> {
@@ -138,6 +305,21 @@ fn jdbc_drivers_dir(plugins_root: &Path) -> PathBuf {
     plugins_root.join("jdbc").join("drivers")
 }
 
+fn jdbc_maven_drivers_dir(plugins_root: &Path) -> PathBuf {
+    jdbc_drivers_dir(plugins_root).join("maven")
+}
+
+fn jdbc_maven_resolver_executable(plugin_dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        plugin_dir.join("bin").join("dbx-maven-resolver.bat")
+    }
+    #[cfg(not(windows))]
+    {
+        plugin_dir.join("bin").join("dbx-maven-resolver")
+    }
+}
+
 async fn jdbc_plugin_status_from_dir(plugin_dir: &Path) -> Result<JdbcPluginStatus, String> {
     let manifest_path = plugin_dir.join("manifest.json");
     let manifest = match std::fs::read_to_string(&manifest_path) {
@@ -180,22 +362,34 @@ fn build_plugin_status(
 }
 
 async fn latest_jdbc_plugin() -> Option<JdbcPluginLatest> {
-    fetch_latest_release().await.ok().and_then(|release| release.jdbc_plugin)
+    // 只需 jdbc_plugin，不关心 release notes；传中文 locale 跳过英文 notes 拉取
+    fetch_latest_release("zh-CN").await.ok().and_then(|release| release.jdbc_plugin)
 }
 
-async fn download_jdbc_plugin_zip() -> Result<Vec<u8>, String> {
+async fn download_jdbc_plugin_zip_with_progress(progress: &impl Fn(AgentProgressEvent)) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|err| err.to_string())?;
 
-    let resp =
+    let mut resp =
         crate::race_download(&client, JDBC_PLUGIN_DOWNLOAD_URL, JDBC_PLUGIN_R2_PATH, "dbx-jdbc-plugin-installer")
             .await
             .map_err(|err| format!("Failed to download JDBC plugin: {err}"))?;
 
-    let bytes = resp.bytes().await.map_err(|err| err.to_string())?;
-    Ok(bytes.to_vec())
+    let total = resp.content_length().unwrap_or(0);
+    progress(AgentProgressEvent::transfer("jdbc-plugin", 0, total));
+    let mut downloaded = 0;
+    let mut bytes = Vec::with_capacity(total.try_into().unwrap_or(0));
+    while let Some(chunk) = resp.chunk().await.map_err(|err| err.to_string())? {
+        downloaded += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+        progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, total));
+    }
+    if total == 0 {
+        progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, downloaded));
+    }
+    Ok(bytes)
 }
 
 fn install_jdbc_plugin_zip(bytes: &[u8], plugin_dir: &Path) -> Result<(), String> {
@@ -261,11 +455,13 @@ fn install_jdbc_plugin_zip(bytes: &[u8], plugin_dir: &Path) -> Result<(), String
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let executable = plugin_dir.join("bin").join("dbx-jdbc-plugin");
-        if executable.exists() {
-            let mut permissions = std::fs::metadata(&executable).map_err(|err| err.to_string())?.permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(executable, permissions).map_err(|err| err.to_string())?;
+        for executable in ["dbx-jdbc-plugin", "dbx-maven-resolver"] {
+            let executable = plugin_dir.join("bin").join(executable);
+            if executable.exists() {
+                let mut permissions = std::fs::metadata(&executable).map_err(|err| err.to_string())?.permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(executable, permissions).map_err(|err| err.to_string())?;
+            }
         }
     }
 
@@ -308,6 +504,10 @@ fn list_jdbc_drivers_from_dir(drivers_dir: &Path) -> Result<Vec<JdbcDriverInfo>,
     for entry in entries {
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
+        if path.file_name().and_then(|name| name.to_str()) == Some("maven") && path.is_dir() {
+            append_jdbc_maven_driver_jars(&mut drivers, &path)?;
+            continue;
+        }
         if path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("jar")) != Some(true) {
             continue;
         }
@@ -316,10 +516,238 @@ fn list_jdbc_drivers_from_dir(drivers_dir: &Path) -> Result<Vec<JdbcDriverInfo>,
             name: path.file_name().and_then(|name| name.to_str()).unwrap_or("driver.jar").to_string(),
             path: path.to_string_lossy().to_string(),
             size: metadata.len(),
+            bundle_id: None,
         });
     }
     drivers.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(drivers)
+}
+
+fn append_jdbc_maven_driver_jars(drivers: &mut Vec<JdbcDriverInfo>, maven_dir: &Path) -> Result<(), String> {
+    let entries = match std::fs::read_dir(maven_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let bundle_dir = entry.path();
+        if !bundle_dir.is_dir() {
+            continue;
+        }
+        let bundle_id = entry.file_name().to_string_lossy().to_string();
+        let jars_dir = bundle_dir.join("jars");
+        let jars = match std::fs::read_dir(&jars_dir) {
+            Ok(jars) => jars,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.to_string()),
+        };
+        for jar in jars {
+            let jar = jar.map_err(|err| err.to_string())?;
+            let path = jar.path();
+            if path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("jar")) != Some(true) {
+                continue;
+            }
+            let metadata = jar.metadata().map_err(|err| err.to_string())?;
+            drivers.push(JdbcDriverInfo {
+                name: path.file_name().and_then(|name| name.to_str()).unwrap_or("driver.jar").to_string(),
+                path: path.to_string_lossy().to_string(),
+                size: metadata.len(),
+                bundle_id: Some(bundle_id.clone()),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn list_jdbc_maven_bundles_from_dir(maven_dir: &Path) -> Result<Vec<JdbcMavenBundleInfo>, String> {
+    let entries = match std::fs::read_dir(maven_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(err) => return Err(err.to_string()),
+    };
+    let mut bundles = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let manifest_path = entry.path().join("manifest.json");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|err| err.to_string())?;
+        bundles.push(serde_json::from_str::<JdbcMavenBundleInfo>(&raw).map_err(|err| err.to_string())?);
+    }
+    bundles.sort_by(|a, b| a.coordinate.cmp(&b.coordinate));
+    Ok(bundles)
+}
+
+fn install_jdbc_maven_bundle(
+    plugins_root: &Path,
+    coordinate: &str,
+    resolved: &MavenResolveOutput,
+) -> Result<(), String> {
+    if resolved.artifacts.is_empty() {
+        return Err("Maven resolver did not return any JAR artifacts".to_string());
+    }
+    let bundle_id = maven_bundle_id(coordinate);
+    let bundle_dir = jdbc_maven_drivers_dir(plugins_root).join(&bundle_id);
+    let temp_dir = bundle_dir.with_extension("tmp");
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    }
+    std::fs::create_dir_all(temp_dir.join("jars")).map_err(|err| err.to_string())?;
+
+    let mut artifacts = Vec::new();
+    for artifact in &resolved.artifacts {
+        if !artifact.extension.eq_ignore_ascii_case("jar") {
+            continue;
+        }
+        let source = PathBuf::from(&artifact.file);
+        if !source.exists() {
+            return Err(format!("Resolved artifact file does not exist: {}", source.display()));
+        }
+        let file_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("Invalid resolved artifact path: {}", source.display()))?;
+        let target = unique_target_path(&temp_dir.join("jars"), file_name);
+        std::fs::copy(&source, &target)
+            .map_err(|err| format!("Failed to copy {} to {}: {err}", source.display(), target.display()))?;
+        let metadata = std::fs::metadata(&target).map_err(|err| err.to_string())?;
+        let sha256 = file_sha256(&target)?;
+        let final_path = bundle_dir.join("jars").join(target.file_name().unwrap_or_default());
+        artifacts.push(JdbcMavenArtifactInfo {
+            group_id: artifact.group_id.clone(),
+            artifact_id: artifact.artifact_id.clone(),
+            version: artifact.version.clone(),
+            classifier: artifact.classifier.clone(),
+            extension: artifact.extension.clone(),
+            file_name: target.file_name().and_then(|name| name.to_str()).unwrap_or(file_name).to_string(),
+            path: final_path.to_string_lossy().to_string(),
+            size: metadata.len(),
+            sha256,
+        });
+    }
+    if artifacts.is_empty() {
+        return Err("Maven resolver did not return any JAR artifacts".to_string());
+    }
+    let manifest = JdbcMavenBundleInfo {
+        id: bundle_id.clone(),
+        coordinate: resolved.coordinate.clone(),
+        scope: resolved.scope.clone(),
+        repositories: resolved.repositories.clone(),
+        installed_at: chrono::Utc::now().to_rfc3339(),
+        path: bundle_dir.to_string_lossy().to_string(),
+        artifacts,
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())?;
+    std::fs::write(temp_dir.join("manifest.json"), manifest_json).map_err(|err| err.to_string())?;
+    if bundle_dir.exists() {
+        std::fs::remove_dir_all(&bundle_dir).map_err(|err| err.to_string())?;
+    }
+    std::fs::rename(&temp_dir, &bundle_dir).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn install_single_jdbc_maven_artifact(
+    plugins_root: &Path,
+    coordinate: &str,
+    group_id: &str,
+    artifact_id: &str,
+    version: &str,
+    source: &Path,
+    repositories: &[String],
+) -> Result<(), String> {
+    if !source.exists() {
+        return Err(format!("Driver JAR does not exist: {}", source.display()));
+    }
+    let bundle_id = maven_bundle_id(coordinate);
+    let bundle_dir = jdbc_maven_drivers_dir(plugins_root).join(&bundle_id);
+    let temp_dir = bundle_dir.with_extension("tmp");
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    }
+    std::fs::create_dir_all(temp_dir.join("jars")).map_err(|err| err.to_string())?;
+
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid driver file path: {}", source.display()))?;
+    let target = temp_dir.join("jars").join(file_name);
+    std::fs::copy(source, &target)
+        .map_err(|err| format!("Failed to copy {} to {}: {err}", source.display(), target.display()))?;
+    let metadata = std::fs::metadata(&target).map_err(|err| err.to_string())?;
+    let final_path = bundle_dir.join("jars").join(file_name);
+    let manifest = JdbcMavenBundleInfo {
+        id: bundle_id.clone(),
+        coordinate: coordinate.to_string(),
+        scope: "runtime".to_string(),
+        repositories: repositories.to_vec(),
+        installed_at: chrono::Utc::now().to_rfc3339(),
+        path: bundle_dir.to_string_lossy().to_string(),
+        artifacts: vec![JdbcMavenArtifactInfo {
+            group_id: group_id.to_string(),
+            artifact_id: artifact_id.to_string(),
+            version: version.to_string(),
+            classifier: String::new(),
+            extension: "jar".to_string(),
+            file_name: file_name.to_string(),
+            path: final_path.to_string_lossy().to_string(),
+            size: metadata.len(),
+            sha256: file_sha256(&target)?,
+        }],
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|err| err.to_string())?;
+    std::fs::write(temp_dir.join("manifest.json"), manifest_json).map_err(|err| err.to_string())?;
+    if bundle_dir.exists() {
+        std::fs::remove_dir_all(&bundle_dir).map_err(|err| err.to_string())?;
+    }
+    std::fs::rename(&temp_dir, &bundle_dir).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn maven_bundle_id(coordinate: &str) -> String {
+    let mut id = String::with_capacity(coordinate.len());
+    for ch in coordinate.trim().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-') {
+            id.push(ch);
+        } else {
+            id.push('_');
+        }
+    }
+    if id.is_empty() {
+        "maven-driver".to_string()
+    } else {
+        id
+    }
+}
+
+fn is_safe_bundle_id(bundle_id: &str) -> bool {
+    !bundle_id.is_empty() && bundle_id.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
+    let hash = Sha256::digest(bytes);
+    Ok(format!("{hash:x}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct MavenResolveOutput {
+    coordinate: String,
+    scope: String,
+    repositories: Vec<String>,
+    artifacts: Vec<MavenResolvedArtifact>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MavenResolvedArtifact {
+    group_id: String,
+    artifact_id: String,
+    version: String,
+    classifier: String,
+    extension: String,
+    file: String,
 }
 
 pub fn unique_target_path(dir: &Path, file_name: &str) -> PathBuf {
@@ -338,4 +766,151 @@ pub fn unique_target_path(dir: &Path, file_name: &str) -> PathBuf {
         }
     }
     unreachable!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::PluginRuntimeEnv;
+
+    #[test]
+    fn maven_bundle_install_lists_nested_jars() {
+        let root = std::env::temp_dir().join(format!("dbx-jdbc-maven-test-{}", uuid::Uuid::new_v4()));
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("demo-driver.jar");
+        std::fs::write(&source, b"jar").unwrap();
+
+        let resolved = MavenResolveOutput {
+            coordinate: "com.example:demo-driver:1.0.0".to_string(),
+            scope: "runtime".to_string(),
+            repositories: vec!["https://repo.maven.apache.org/maven2/".to_string()],
+            artifacts: vec![MavenResolvedArtifact {
+                group_id: "com.example".to_string(),
+                artifact_id: "demo-driver".to_string(),
+                version: "1.0.0".to_string(),
+                classifier: String::new(),
+                extension: "jar".to_string(),
+                file: source.to_string_lossy().to_string(),
+            }],
+        };
+
+        install_jdbc_maven_bundle(&root, "com.example:demo-driver:1.0.0", &resolved).unwrap();
+        let drivers = list_jdbc_drivers(&root).unwrap();
+        assert_eq!(drivers.len(), 1);
+        assert_eq!(drivers[0].name, "demo-driver.jar");
+        assert_eq!(drivers[0].bundle_id.as_deref(), Some("com.example_demo-driver_1.0.0"));
+
+        let bundles = list_jdbc_maven_bundles(&root).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].artifacts.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn maven_bundle_ids_are_path_safe() {
+        assert_eq!(
+            maven_bundle_id("org.apache.hive:hive-jdbc:4.0.1:standalone"),
+            "org.apache.hive_hive-jdbc_4.0.1_standalone"
+        );
+        assert!(is_safe_bundle_id("org.apache.hive_hive-jdbc_4.0.1_standalone"));
+        assert!(!is_safe_bundle_id("../hive"));
+    }
+
+    #[test]
+    fn installs_prestosql_direct_driver_as_builtin_bundle() {
+        let root = std::env::temp_dir().join(format!("dbx-prestosql-direct-driver-test-{}", uuid::Uuid::new_v4()));
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("presto-jdbc-350.jar");
+        std::fs::write(&source, b"presto").unwrap();
+
+        install_single_jdbc_maven_artifact(
+            &root,
+            PRESTOSQL_JDBC_DRIVER_COORDINATE,
+            "io.prestosql",
+            "presto-jdbc",
+            PRESTOSQL_JDBC_DRIVER_VERSION,
+            &source,
+            &[PRESTOSQL_JDBC_DRIVER_REPOSITORY.to_string()],
+        )
+        .unwrap();
+
+        let bundles = list_jdbc_maven_bundles(&root).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].id, "io.prestosql_presto-jdbc_350");
+        assert_eq!(bundles[0].coordinate, PRESTOSQL_JDBC_DRIVER_COORDINATE);
+        assert_eq!(bundles[0].artifacts[0].file_name, "presto-jdbc-350.jar");
+
+        let drivers = list_jdbc_drivers(&root).unwrap();
+        assert_eq!(drivers.len(), 1);
+        assert_eq!(drivers[0].bundle_id.as_deref(), Some("io.prestosql_presto-jdbc_350"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn maven_resolver_receives_runtime_env() {
+        let root = std::env::temp_dir().join(format!("dbx-jdbc-maven-env-test-{}", uuid::Uuid::new_v4()));
+        let plugin_dir = root.join("jdbc");
+        let bin_dir = plugin_dir.join("bin");
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("env-driver.jar");
+        std::fs::write(&source, b"jar").unwrap();
+
+        let output = serde_json::json!({
+            "coordinate": "com.example:env-driver:1.0.0",
+            "scope": "runtime",
+            "repositories": ["https://repo.maven.apache.org/maven2/"],
+            "artifacts": [{
+                "groupId": "com.example",
+                "artifactId": "env-driver",
+                "version": "1.0.0",
+                "classifier": "",
+                "extension": "jar",
+                "file": source.to_string_lossy(),
+            }],
+        })
+        .to_string();
+        let resolver = jdbc_maven_resolver_executable(&plugin_dir);
+        if cfg!(windows) {
+            std::fs::write(
+                &resolver,
+                format!(
+                    "@echo off\r\nif \"%DBX_JAVA_BIN%\"==\"\" (\r\n  echo missing DBX_JAVA_BIN 1>&2\r\n  exit /b 2\r\n)\r\necho {output}\r\n"
+                ),
+            )
+            .unwrap();
+        } else {
+            std::fs::write(
+                &resolver,
+                format!(
+                    "#!/usr/bin/env sh\nif [ -z \"${{DBX_JAVA_BIN:-}}\" ]; then\n  echo missing DBX_JAVA_BIN >&2\n  exit 2\nfi\necho '{}'\n",
+                    output.replace('\'', "'\\''")
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let drivers = install_jdbc_driver_from_maven(
+            &root,
+            JdbcMavenInstallRequest { coordinate: "com.example:env-driver:1.0.0".to_string(), repositories: vec![] },
+            PluginRuntimeEnv::default().with_var("DBX_JAVA_BIN", "java-from-managed-jre"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(drivers.len(), 1);
+        assert_eq!(drivers[0].name, "env-driver.jar");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
