@@ -1,4 +1,4 @@
-pnpm exec lint-staged
+bunx lint-staged
 
 # Only format and re-add Rust files that are already staged
 TOPLEVEL=$(git rev-parse --show-toplevel)
