@@ -253,7 +253,7 @@ mod tests {
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     use dbx_core::storage::Storage;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -333,7 +333,7 @@ mod tests {
             public_base_path: "/".to_string(),
             password_disabled: false,
             password_hash: RwLock::new(None),
-            sessions: RwLock::new(HashSet::new()),
+            sessions: RwLock::new(HashMap::new()),
             sse_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),

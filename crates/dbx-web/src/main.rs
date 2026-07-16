@@ -16,7 +16,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::{header, StatusCode, Uri};
 use axum::middleware;
 #[cfg(feature = "embedded-static")]
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
@@ -68,9 +68,27 @@ fn normalize_public_base_path(value: Option<String>) -> String {
     }
 }
 
+fn static_asset_path_for_request<'a>(request_path: &'a str, public_base_path: &str) -> &'a str {
+    let path = request_path.trim_start_matches('/');
+    let base = public_base_path.trim_matches('/');
+    let asset_path = if base.is_empty() {
+        path
+    } else if path == base {
+        ""
+    } else {
+        path.strip_prefix(base).and_then(|rest| rest.strip_prefix('/')).unwrap_or(path)
+    };
+
+    if asset_path.is_empty() {
+        "index.html"
+    } else {
+        asset_path
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalize_public_base_path, web_agent_dir_from_env};
+    use super::{normalize_public_base_path, static_asset_path_for_request, web_agent_dir_from_env};
 
     #[test]
     fn normalize_public_base_path_defaults_to_root() {
@@ -90,6 +108,25 @@ mod tests {
     #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
     fn normalize_public_base_path_rejects_invalid_characters() {
         normalize_public_base_path(Some("/dbx admin".to_string()));
+    }
+
+    #[test]
+    fn static_asset_path_defaults_to_index() {
+        assert_eq!(static_asset_path_for_request("/", "/"), "index.html");
+        assert_eq!(static_asset_path_for_request("/dbx", "/dbx"), "index.html");
+        assert_eq!(static_asset_path_for_request("/dbx/", "/dbx"), "index.html");
+    }
+
+    #[test]
+    fn static_asset_path_strips_public_base_path_when_present() {
+        assert_eq!(static_asset_path_for_request("/dbx/assets/app.js", "/dbx"), "assets/app.js");
+        assert_eq!(static_asset_path_for_request("/tools/dbx/assets/app.js", "/tools/dbx"), "assets/app.js");
+    }
+
+    #[test]
+    fn static_asset_path_supports_stripped_proxy_paths() {
+        assert_eq!(static_asset_path_for_request("/assets/app.js", "/dbx"), "assets/app.js");
+        assert_eq!(static_asset_path_for_request("/query/history", "/dbx"), "query/history");
     }
 
     #[test]
@@ -161,9 +198,8 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
 }
 
 #[cfg(feature = "embedded-static")]
-async fn embedded_static_handler(uri: Uri) -> impl IntoResponse {
-    let requested_path = uri.path().trim_start_matches('/');
-    let asset_path = if requested_path.is_empty() { "index.html" } else { requested_path };
+fn embedded_static_response(uri: Uri, public_base_path: &str) -> Response {
+    let asset_path = static_asset_path_for_request(uri.path(), public_base_path);
     let asset = embedded_static::get(asset_path).or_else(|| embedded_static::get("index.html"));
     match asset {
         Some(asset) => ([(header::CONTENT_TYPE, asset.content_type)], asset.bytes).into_response(),
@@ -613,12 +649,16 @@ async fn main() {
     } else {
         #[cfg(feature = "embedded-static")]
         {
-            app = app.fallback(embedded_static_handler);
+            let embedded_public_base_path = public_base_path.clone();
+            app = app.fallback(move |uri: Uri| {
+                let public_base_path = embedded_public_base_path.clone();
+                async move { embedded_static_response(uri, &public_base_path) }
+            });
         }
     }
 
     if public_base_path != "/" {
-        app = Router::new().nest(&public_base_path, app);
+        app = Router::new().nest(&public_base_path, app.clone()).merge(app);
     }
 
     // Bind address
