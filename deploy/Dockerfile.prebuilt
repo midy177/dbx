@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+
+FROM debian:bookworm-slim
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    fontconfig \
+    fonts-dejavu-core \
+    libfreetype6 \
+    libssl3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY dist/docker/linux/${TARGETARCH}/dbx-web /usr/local/bin/dbx-web
+ENV DBX_DATA_DIR=/app/data
+EXPOSE 4224
+CMD ["dbx-web"]

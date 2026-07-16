@@ -12,7 +12,11 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
+#[cfg(feature = "embedded-static")]
+use axum::http::{header, StatusCode, Uri};
 use axum::middleware;
+#[cfg(feature = "embedded-static")]
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
@@ -21,6 +25,11 @@ use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
 use state::WebState;
+
+#[cfg(feature = "embedded-static")]
+mod embedded_static {
+    include!(concat!(env!("OUT_DIR"), "/embedded_static.rs"));
+}
 
 fn web_body_limit_bytes() -> usize {
     const DEFAULT_MB: usize = 1024;
@@ -149,6 +158,17 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
 #[cfg(not(feature = "mq-admin"))]
 fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
+}
+
+#[cfg(feature = "embedded-static")]
+async fn embedded_static_handler(uri: Uri) -> impl IntoResponse {
+    let requested_path = uri.path().trim_start_matches('/');
+    let asset_path = if requested_path.is_empty() { "index.html" } else { requested_path };
+    let asset = embedded_static::get(asset_path).or_else(|| embedded_static::get("index.html"));
+    match asset {
+        Some(asset) => ([(header::CONTENT_TYPE, asset.content_type)], asset.bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 #[tokio::main]
@@ -590,6 +610,11 @@ async fn main() {
         let index_path = format!("{}/index.html", static_dir);
         let serve_dir = ServeDir::new(&static_dir).not_found_service(ServeFile::new(&index_path));
         app = app.fallback_service(serve_dir);
+    } else {
+        #[cfg(feature = "embedded-static")]
+        {
+            app = app.fallback(embedded_static_handler);
+        }
     }
 
     if public_base_path != "/" {

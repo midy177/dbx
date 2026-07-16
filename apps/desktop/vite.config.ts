@@ -95,6 +95,7 @@ export default defineConfig(async () => ({
   build: {
     outDir: "../../dist",
     emptyOutDir: true,
+    chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
         manualChunks: chunkNameForModule,
