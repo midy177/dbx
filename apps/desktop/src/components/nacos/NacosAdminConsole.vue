@@ -184,14 +184,14 @@ async function configLanguageExtension(format: string): Promise<Extension[]> {
 async function mountConfigEditor() {
   await nextTick();
   if (!configEditorHost.value || configEditorView.value || !selectedConfig.value) return;
-  const [{ EditorState, Prec }, { EditorView, keymap }, { basicSetup }, { defaultKeymap, historyKeymap, indentWithTab }, { search: cmSearch }, language] = await Promise.all([
-    import("@codemirror/state"),
-    import("@codemirror/view"),
-    import("codemirror"),
-    import("@codemirror/commands"),
-    import("@codemirror/search"),
-    configLanguageExtension(configType.value),
-  ]);
+  const [
+    { EditorState, Prec },
+    { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor },
+    { defaultKeymap, history, historyKeymap, indentWithTab },
+    { bracketMatching, foldGutter, syntaxHighlighting, defaultHighlightStyle },
+    { search: cmSearch },
+    language,
+  ] = await Promise.all([import("@codemirror/state"), import("@codemirror/view"), import("@codemirror/commands"), import("@codemirror/language"), import("@codemirror/search"), configLanguageExtension(configType.value)]);
   const editorSettings = settingsStore.editorSettings;
   const theme = await loadEditorTheme(editorSettings.theme, editorThemeAppearance(), currentCustomThemeColors(), themePalette.value);
   const view = new EditorView({
@@ -207,7 +207,15 @@ async function mountConfigEditor() {
             return { dom };
           },
         }),
-        basicSetup,
+        lineNumbers(),
+        highlightActiveLineGutter(),
+        highlightSpecialChars(),
+        history(),
+        foldGutter(),
+        drawSelection(),
+        dropCursor(),
+        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        bracketMatching(),
         trimmedSelectionLayer(),
         Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: "Mod-h", run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
         keymap.of([...defaultKeymap, ...historyKeymap]),

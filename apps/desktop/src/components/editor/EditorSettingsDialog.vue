@@ -2326,7 +2326,13 @@ watch(previewRef, async (el) => {
   previewInitialized = true;
   if (previewView.value) return;
 
-  const [{ EditorView, Decoration, ViewPlugin, gutter, GutterMarker }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [
+    { EditorView, Decoration, ViewPlugin, gutter, GutterMarker, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor },
+    { EditorState, Compartment, StateEffect, StateField },
+    { sql, MySQL },
+    { history, defaultKeymap, historyKeymap },
+    { bracketMatching, foldGutter, syntaxHighlighting, defaultHighlightStyle },
+  ] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/commands"), import("@codemirror/language")]);
 
   editorViewModule = { Decoration, EditorView, ViewPlugin } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
@@ -2408,7 +2414,16 @@ watch(previewRef, async (el) => {
   const state = EditorState.create({
     doc: currentPreviewSql(),
     extensions: [
-      basicSetup,
+      lineNumbers(),
+      highlightActiveLineGutter(),
+      highlightSpecialChars(),
+      history(),
+      foldGutter(),
+      drawSelection(),
+      dropCursor(),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      bracketMatching(),
+      keymap.of([...defaultKeymap, ...historyKeymap]),
       sql({ dialect: MySQL }),
       themeComp.of(themeExt),
       fontThemeComp.of(editorFontTheme(EditorView, ss.fontSize, ss.fontFamily)),

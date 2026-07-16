@@ -81,7 +81,8 @@ watch(
 async function initDdlEditor(content: string) {
   if (!ddlEditorContainer.value) return;
   destroyDdlEditor();
-  const [{ EditorView, keymap }, { EditorState, Prec }, langSql, { basicSetup }, { search: cmSearch }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror"), import("@codemirror/search")]);
+  const [{ EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor }, { EditorState, Prec }, langSql, { history, defaultKeymap, historyKeymap }, { bracketMatching, foldGutter, syntaxHighlighting, defaultHighlightStyle }, { search: cmSearch }] =
+    await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/commands"), import("@codemirror/language"), import("@codemirror/search")]);
   const editorTheme = settingsStore.editorSettings.theme;
   const appAppearance = isDark.value ? "dark" : "light";
   const fontSize = settingsStore.editorSettings.fontSize;
@@ -102,7 +103,16 @@ async function initDdlEditor(content: string) {
           return { dom };
         },
       }),
-      basicSetup,
+      lineNumbers(),
+      highlightActiveLineGutter(),
+      highlightSpecialChars(),
+      history(),
+      foldGutter(),
+      drawSelection(),
+      dropCursor(),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      bracketMatching(),
+      keymap.of([...defaultKeymap, ...historyKeymap]),
       langSql.sql({ dialect }),
       themeExt,
       fontExt,

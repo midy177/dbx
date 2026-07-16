@@ -6,8 +6,29 @@ import path from "path";
 const host = process.env.TAURI_DEV_HOST;
 const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
 const configuredBasePath = process.env.VITE_DBX_BASE_PATH || process.env.DBX_PUBLIC_BASE_PATH;
+const codemirrorDedupePackages = [
+  "@codemirror/autocomplete",
+  "@codemirror/commands",
+  "@codemirror/lang-css",
+  "@codemirror/lang-html",
+  "@codemirror/lang-javascript",
+  "@codemirror/lang-json",
+  "@codemirror/lang-sql",
+  "@codemirror/lang-xml",
+  "@codemirror/lang-yaml",
+  "@codemirror/language",
+  "@codemirror/legacy-modes",
+  "@codemirror/lint",
+  "@codemirror/search",
+  "@codemirror/state",
+  "@codemirror/theme-one-dark",
+  "@codemirror/view",
+  "@lezer/common",
+  "@lezer/highlight",
+  "@lezer/lr",
+];
 const manualChunks: Record<string, string[]> = {
-  codemirror: ["codemirror", "@codemirror/lang-sql", "@codemirror/view", "@codemirror/state", "@codemirror/autocomplete", "@codemirror/commands", "@codemirror/theme-one-dark"],
+  codemirror: codemirrorDedupePackages,
   "vue-echarts": ["vue-echarts"],
   ui: ["reka-ui"],
   marked: ["marked"],
@@ -65,6 +86,7 @@ export default defineConfig(async () => ({
   base: viteBase,
   plugins: [vue(), tailwindcss()],
   resolve: {
+    dedupe: codemirrorDedupePackages,
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },

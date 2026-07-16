@@ -521,7 +521,8 @@ function focusEditor() {
 
 function readOnlyExtension(): import("@codemirror/state").Extension {
   if (!codeMirrorEditorState || !editorViewModule) return [];
-  return [codeMirrorEditorState.readOnly.of(!!props.readOnly), editorViewModule.EditorView.editable.of(!props.readOnly)];
+  const isReadOnly = props.readOnly === true;
+  return [codeMirrorEditorState.readOnly.of(isReadOnly), editorViewModule.EditorView.editable.of(!isReadOnly)];
 }
 
 function clearTableNavigationHover() {

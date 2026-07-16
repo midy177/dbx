@@ -110,7 +110,8 @@ const operationColors: Record<DiffOperationType, string> = {
 async function initEditor() {
   if (!editorContainer.value) return;
 
-  const [{ EditorView }, { EditorState, Compartment }, langSql, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
+  const [{ EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor }, { EditorState, Compartment }, langSql, { history, defaultKeymap, historyKeymap }, { bracketMatching, foldGutter, syntaxHighlighting, defaultHighlightStyle }] =
+    await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/commands"), import("@codemirror/language")]);
 
   const themeComp = new Compartment();
   const fontComp = new Compartment();
@@ -128,7 +129,16 @@ async function initEditor() {
   const state = EditorState.create({
     doc: props.deploySql,
     extensions: [
-      basicSetup,
+      lineNumbers(),
+      highlightActiveLineGutter(),
+      highlightSpecialChars(),
+      history(),
+      foldGutter(),
+      drawSelection(),
+      dropCursor(),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      bracketMatching(),
+      keymap.of([...defaultKeymap, ...historyKeymap]),
       langSql.sql({ dialect }),
       themeComp.of(themeExt),
       fontComp.of(fontExt),
