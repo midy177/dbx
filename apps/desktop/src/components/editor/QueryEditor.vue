@@ -199,6 +199,7 @@ interface EditorGestureEvent extends Event {
 }
 
 let editorViewModule: typeof import("@codemirror/view") | null = null;
+let codeMirrorEditorState: typeof import("@codemirror/state").EditorState | null = null;
 let codeMirrorPrec: typeof import("@codemirror/state").Prec | null = null;
 let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelection | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
@@ -516,6 +517,11 @@ function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEv
 
 function focusEditor() {
   view.value?.focus();
+}
+
+function readOnlyExtension(): import("@codemirror/state").Extension {
+  if (!codeMirrorEditorState || !editorViewModule) return [];
+  return [codeMirrorEditorState.readOnly.of(!!props.readOnly), editorViewModule.EditorView.editable.of(!props.readOnly)];
 }
 
 function clearTableNavigationHover() {
@@ -2529,6 +2535,7 @@ onMounted(async () => {
     { searchKeymap },
   ] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/autocomplete"), import("@codemirror/commands"), import("@codemirror/language"), import("@codemirror/search")]);
   editorViewModule = { EditorView, keymap, rectangularSelection } as typeof import("@codemirror/view");
+  codeMirrorEditorState = EditorState;
   codeMirrorPrec = Prec;
   codeMirrorEditorSelection = EditorSelection;
   codeMirrorSnippetCompletion = snippetCompletion;
@@ -2822,7 +2829,7 @@ onMounted(async () => {
       ),
       runKeymapComp.of(runKeymapExtension(keymap)),
       wordWrapComp.of(props.forceWordWrap || initialSettings.wordWrap ? EditorView.lineWrapping : []),
-      readOnlyComp.of([EditorState.readOnly.of(!!props.readOnly), EditorView.editable.of(!props.readOnly)]),
+      readOnlyComp.of(readOnlyExtension()),
       indentComp.of(indentExtension()),
       rectangularSelection({ eventFilter: (e: MouseEvent) => e.altKey || e.button === 1 }),
       EditorView.updateListener.of((update) => {
@@ -3043,6 +3050,7 @@ onMounted(async () => {
   registerEditorScrollbarPointerGuard(view.value);
   view.value.scrollDOM.addEventListener("scroll", scheduleEditorViewportEmit, { passive: true });
   restoreEditorViewport();
+  restoreEditorFocus();
   syncContextMenuState(view.value);
   syncEditorFontCssVars(liveFontSize.value, initialSettings.fontFamily);
   registerTableReferenceDropListener();
@@ -3131,6 +3139,16 @@ watch(
     if (!view.value || !wordWrapComp) return;
     view.value.dispatch({
       effects: wordWrapComp.reconfigure(wordWrapExtension()),
+    });
+  },
+);
+
+watch(
+  () => props.readOnly,
+  () => {
+    if (!view.value || !readOnlyComp) return;
+    view.value.dispatch({
+      effects: readOnlyComp.reconfigure(readOnlyExtension()),
     });
   },
 );
@@ -3295,7 +3313,7 @@ function restoreEditorSelection() {
 
 function restoreEditorFocus() {
   const focusEditorAcrossFrames = () => {
-    if (!view.value || view.value.hasFocus) return;
+    if (!editorIsActive || !view.value || view.value.hasFocus) return;
     view.value.focus();
   };
   focusEditorAcrossFrames();
