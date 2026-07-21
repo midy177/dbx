@@ -149,7 +149,12 @@ function parseIssueSections(body) {
 }
 
 function databaseField(body) {
-  return parseIssueSections(body).find(({ heading }) => /数据库类型|database type/iu.test(heading))?.content || "";
+  const section = parseIssueSections(body).find(({ heading }) => /数据库类型|database type/iu.test(heading))?.content;
+  if (section) return section;
+
+  // Bot-created issues historically used a bold inline metadata field instead of an issue-form heading.
+  const inline = String(body || "").match(/^\s*\*\*(?:数据库类型(?:和版本)?|database type)\*\*\s*[:：]\s*(.+?)\s*$/imu);
+  return inline?.[1]?.trim() || "";
 }
 
 function relevantBody(body) {

@@ -98,6 +98,22 @@ test("detects database conflicts from issue forms before labels are added", () =
   assert.equal(scoreCandidate(issue, postgresCandidate).accepted, true);
 });
 
+test("detects database conflicts from legacy bot metadata", () => {
+  const issue = {
+    ...baseIssue,
+    body: "**来源**: QQ 群反馈\n**数据库类型和版本**: PostgreSQL 16\n\n## 原始描述\n修改后保存失败。",
+    labels: [{ name: "bug" }],
+  };
+  const candidate = {
+    number: 102,
+    title: "MySQL 查询结果修改后保存失败",
+    body: "### 数据库类型和版本\n\nMySQL 8.0\n\n### 问题描述\n\n修改后保存失败。",
+    labels: [{ name: "bug" }],
+  };
+
+  assert.equal(scoreCandidate(issue, candidate).reason, "database-mismatch");
+});
+
 test("does not treat a shared database product as issue similarity", () => {
   const issue = {
     number: 4048,
