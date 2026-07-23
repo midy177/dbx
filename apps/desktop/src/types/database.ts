@@ -754,6 +754,7 @@ export interface TableStructureEditorDraft {
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
+  triggersLoaded?: boolean;
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   initialized: boolean;
 }
