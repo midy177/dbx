@@ -230,6 +230,7 @@ export default withEnglishFallback({
     driverName: "驱动名称",
     driverNamePlaceholder: "厂商或环境名称",
     urlParams: "URL 参数",
+    localInfilePathHint: "使用 LOAD DATA LOCAL INFILE 时，请通过 localInfilePath=/绝对路径/file.csv 明确授权文件；多个文件需重复填写该参数。",
     d1AccountId: "Account ID",
     d1DatabaseId: "Database ID",
     d1ApiToken: "API Token",

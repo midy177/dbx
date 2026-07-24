@@ -785,9 +785,14 @@ pub async fn list_sqlserver_linked_server_tables_core(
 /// flat-sidebar fallback then renders the standard database list.
 pub async fn list_doris_catalogs_core(state: &AppState, connection_id: &str) -> Result<Vec<db::CatalogInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     if let Some(PoolKind::Mysql(p, _)) = connections.get(&pool_key) {
-        return db::mysql::list_doris_catalogs(p).await;
+        return if db_config.as_ref().is_some_and(is_starrocks_config) {
+            db::starrocks::list_catalogs(p).await
+        } else {
+            db::doris::list_catalogs(p).await
+        };
     }
     Ok(vec![])
 }
@@ -809,7 +814,11 @@ pub async fn list_doris_catalog_databases_core(
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    let databases = db::mysql::list_databases_show_from(p, catalog).await;
+    let databases = if db_config.as_ref().is_some_and(is_starrocks_config) {
+        db::starrocks::list_catalog_databases(p, catalog).await
+    } else {
+        db::doris::list_catalog_databases(p, catalog).await
+    };
     // External catalogs may reject `SHOW DATABASES FROM <catalog>` when the user
     // lacks permission — surface as an empty list rather than an error.
     let databases = match databases {
@@ -842,14 +851,18 @@ pub async fn list_doris_catalog_tables_core(
     object_types: Option<&[String]>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    db::mysql::list_tables_show_from(p, catalog, database)
-        .await
-        .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+    let tables = if db_config.as_ref().is_some_and(is_starrocks_config) {
+        db::starrocks::list_catalog_tables(p, catalog, database).await
+    } else {
+        db::doris::list_catalog_tables(p, catalog, database).await
+    }?;
+    Ok(filter_table_infos(tables, filter, limit, offset, object_types))
 }
 
 /// Columns of an external catalog table via `SHOW COLUMNS FROM <catalog>.<db>.<table>`.
@@ -861,12 +874,18 @@ pub async fn get_doris_catalog_columns_core(
     table: &str,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    db::mysql::get_columns_show_from(p, catalog, database, table).await.map(deduplicate_column_infos)
+    let columns = if db_config.as_ref().is_some_and(is_starrocks_config) {
+        db::starrocks::get_catalog_columns(p, catalog, database, table).await
+    } else {
+        db::doris::get_catalog_columns(p, catalog, database, table).await
+    }?;
+    Ok(deduplicate_column_infos(columns))
 }
 
 /// DDL for an external catalog table via `SHOW CREATE TABLE <catalog>.<db>.<table>`.
@@ -878,12 +897,17 @@ pub async fn get_doris_catalog_table_ddl_core(
     table: &str,
 ) -> Result<String, String> {
     let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     let PoolKind::Mysql(p, _) = pool else {
         return Err("DDL not supported for this connection".to_string());
     };
-    db::mysql::show_create_table_ddl_from(p, catalog, database, table).await
+    if db_config.as_ref().is_some_and(is_starrocks_config) {
+        db::starrocks::get_catalog_table_ddl(p, catalog, database, table).await
+    } else {
+        db::doris::get_catalog_table_ddl(p, catalog, database, table).await
+    }
 }
 
 /// Best-effort index listing for an external catalog table (derived from DDL).
@@ -895,12 +919,17 @@ pub async fn list_doris_catalog_indexes_core(
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, None).await?;
+    let db_config = connection_config(state, connection_id).await;
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
     let PoolKind::Mysql(p, _) = pool else {
         return Ok(vec![]);
     };
-    db::mysql::list_doris_catalog_indexes(p, catalog, database, table).await
+    if db_config.as_ref().is_some_and(is_starrocks_config) {
+        db::starrocks::list_catalog_indexes(p, catalog, database, table).await
+    } else {
+        db::doris::list_catalog_indexes(p, catalog, database, table).await
+    }
 }
 
 /// Table comment for an external catalog table. Doris does not reliably expose
@@ -4972,8 +5001,10 @@ pub async fn list_indexes_core(
                 }
                 if *mode == MysqlMode::OceanBaseOracle {
                     db::ob_oracle::list_indexes(p, schema, table).await
-                } else if db_config.as_ref().is_some_and(is_doris_family_config) {
-                    db::mysql::list_doris_family_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
+                } else if db_config.as_ref().is_some_and(is_starrocks_config) {
+                    db::starrocks::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
+                } else if db_config.as_ref().is_some_and(is_doris_config) {
+                    db::doris::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
                 } else {
                     db::mysql::list_indexes(p, mysql_table_metadata_catalog(database, schema), table).await
                 }
@@ -5556,6 +5587,10 @@ fn agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len
 fn is_doris_family_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
         || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks" | "manticoresearch"))
+}
+
+fn is_doris_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Doris || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb"))
 }
 
 fn is_starrocks_config(config: &ConnectionConfig) -> bool {

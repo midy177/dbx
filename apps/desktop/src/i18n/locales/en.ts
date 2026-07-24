@@ -228,6 +228,7 @@ export default {
     driverName: "Driver Name",
     driverNamePlaceholder: "Vendor or environment name",
     urlParams: "URL Params",
+    localInfilePathHint: "For LOAD DATA LOCAL INFILE, whitelist each file explicitly with localInfilePath=/absolute/path/file.csv. Repeat the parameter for additional files.",
     d1AccountId: "Account ID",
     d1DatabaseId: "Database ID",
     d1ApiToken: "API Token",

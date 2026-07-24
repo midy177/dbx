@@ -46,9 +46,7 @@ pub(in crate::schema) async fn list_tables(
             let db = if schema.is_empty() { database } else { schema };
             db::mysql::list_tables(p, db).await
         }
-        PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
-            db::questdb::list_tables(p, schema).await
-        }
+        PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => db::questdb::list_tables(p, schema).await,
         PoolKind::Postgres(p) => db::postgres::list_tables(p, schema).await,
         PoolKind::Sqlite(p) => db::sqlite::list_tables(p, schema).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_tables(client, schema).await,
@@ -59,9 +57,9 @@ pub(in crate::schema) async fn list_tables(
         PoolKind::Elasticsearch(client) => {
             db::elasticsearch_driver::list_indices(client).await.map(|names| collection_names_to_tables(names, "INDEX"))
         }
-        PoolKind::VectorDb(client) => {
-            db::vector_driver::list_collections(client).await.map(|infos| collection_names_to_tables(infos.into_iter().map(|i| i.name).collect(), "COLLECTION"))
-        }
+        PoolKind::VectorDb(client) => db::vector_driver::list_collections(client)
+            .await
+            .map(|infos| collection_names_to_tables(infos.into_iter().map(|i| i.name).collect(), "COLLECTION")),
         _ => Ok(vec![]),
     }
 }
@@ -82,9 +80,9 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
             db::mysql::list_table_objects_show(p, database).await.map(Some)
         }
-        PoolKind::Mysql(p, _) => db::mysql::list_objects(p, database, None, None, None)
-            .await
-            .map(|result| Some(result.objects)),
+        PoolKind::Mysql(p, _) => {
+            db::mysql::list_objects(p, database, None, None, None).await.map(|result| Some(result.objects))
+        }
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
             db::questdb::list_objects(p, schema).await.map(Some)
         }
@@ -158,8 +156,14 @@ pub(in crate::schema) async fn list_indexes(
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
             db::ob_oracle::list_indexes(p, schema, table).await
         }
-        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_family_config) => {
-            db::mysql::list_doris_family_indexes(p, database, table).await
+        PoolKind::Mysql(p, _) if config.is_some_and(is_starrocks_config) => {
+            db::starrocks::list_indexes(p, database, table).await
+        }
+        PoolKind::Mysql(p, _) if config.is_some_and(is_doris_config) => {
+            db::doris::list_indexes(p, database, table).await
+        }
+        PoolKind::Mysql(p, _) if config.is_some_and(is_manticoresearch_config) => {
+            db::mysql_compatible::list_indexes_with_ddl_fallback(p, database, table).await
         }
         PoolKind::Mysql(p, _) => db::mysql::list_indexes(p, schema, table).await,
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
@@ -262,11 +266,8 @@ pub(in crate::schema) async fn object_source(
         }
         PoolKind::Sqlite(pool) => {
             let source = super::super::first_string_cell(
-                db::sqlite::execute_query(
-                    pool,
-                    &super::super::sqlite_object_source_sql(schema, name, object_type),
-                )
-                .await?,
+                db::sqlite::execute_query(pool, &super::super::sqlite_object_source_sql(schema, name, object_type))
+                    .await?,
             )?;
             Ok(Some(source))
         }
@@ -320,15 +321,20 @@ fn is_doris_family_config(config: &ConnectionConfig) -> bool {
         || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb" | "starrocks" | "manticoresearch"))
 }
 
+fn is_doris_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Doris || matches!(config.driver_profile.as_deref(), Some("doris" | "selectdb"))
+}
+
+fn is_starrocks_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::StarRocks || matches!(config.driver_profile.as_deref(), Some("starrocks"))
+}
+
 fn is_manticoresearch_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::ManticoreSearch)
         || matches!(config.driver_profile.as_deref(), Some("manticoresearch"))
 }
 
-fn mysql_show_metadata_database_for_config<'a>(
-    config: Option<&ConnectionConfig>,
-    database: &'a str,
-) -> &'a str {
+fn mysql_show_metadata_database_for_config<'a>(config: Option<&ConnectionConfig>, database: &'a str) -> &'a str {
     if config.is_some_and(is_manticoresearch_config) {
         ""
     } else {
@@ -352,6 +358,5 @@ fn is_mysql_system_database(name: &str) -> bool {
 }
 
 fn is_questdb_config(config: &ConnectionConfig) -> bool {
-    matches!(config.db_type, DatabaseType::Questdb)
-        || matches!(config.driver_profile.as_deref(), Some("questdb"))
+    matches!(config.db_type, DatabaseType::Questdb) || matches!(config.driver_profile.as_deref(), Some("questdb"))
 }

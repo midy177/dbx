@@ -5877,29 +5877,35 @@ function openExternalUrl(url: string) {
                     </label>
                   </div>
 
-                  <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
-                    <Input
-                      v-model="form.url_params"
-                      class="col-span-3"
-                      :placeholder="
-                        form.db_type === 'mysql'
-                          ? 'charset=utf8mb4'
-                          : form.db_type === 'saphana'
-                            ? 'databaseName=TENANT_DB'
-                            : form.db_type === 'clickhouse'
-                              ? 'secure=true'
-                              : form.db_type === 'bigquery'
-                                ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
-                                : form.db_type === 'informix'
-                                  ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                  : form.db_type === 'spark'
-                                    ? 'catalog=paimon_catalog'
-                                    : form.db_type === 'cassandra'
-                                      ? 'localdatacenter=dc1'
-                                      : 'sslmode=prefer'
-                      "
-                    />
+                    <div class="col-span-3 space-y-1.5">
+                      <Input
+                        v-model="form.url_params"
+                        :placeholder="
+                          form.db_type === 'mysql'
+                            ? 'charset=utf8mb4'
+                            : form.db_type === 'doris' || form.db_type === 'starrocks'
+                              ? 'sessionVariables=query_timeout=60'
+                              : form.db_type === 'saphana'
+                                ? 'databaseName=TENANT_DB'
+                                : form.db_type === 'clickhouse'
+                                  ? 'secure=true'
+                                  : form.db_type === 'bigquery'
+                                    ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
+                                    : form.db_type === 'informix'
+                                      ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
+                                      : form.db_type === 'spark'
+                                        ? 'catalog=paimon_catalog'
+                                        : form.db_type === 'cassandra'
+                                          ? 'localdatacenter=dc1'
+                                          : 'sslmode=prefer'
+                        "
+                      />
+                      <p v-if="form.db_type === 'mysql' || form.db_type === 'doris' || form.db_type === 'starrocks'" class="text-xs leading-5 text-muted-foreground">
+                        {{ t("connection.localInfilePathHint") }}
+                      </p>
+                    </div>
                   </div>
 
                   <template v-if="isPrestoSqlConnection">
