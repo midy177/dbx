@@ -826,6 +826,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               auto-focus
               :model-value="activeTab.sql"
               :connection-id="activeTab.connectionId"
+              :catalog="activeTab.catalog"
               :database="activeTab.database"
               :schema="activeTab.schema"
               :client-session-id="activeTab.id"

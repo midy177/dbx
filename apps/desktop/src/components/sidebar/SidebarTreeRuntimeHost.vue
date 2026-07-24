@@ -1089,7 +1089,7 @@ async function newQuery() {
         await newSelectTemplate();
         return;
       }
-      queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema);
+      queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog);
       return;
     }
     const connection = connectionStore.getConfig(node.connectionId);
